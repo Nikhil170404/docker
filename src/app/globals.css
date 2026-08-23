@@ -1,26 +1,52 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0b;
+  --foreground: #ededed;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --border: #262626;
+  --muted: #a1a1aa;
+  --surface: #131316;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-surface: var(--surface);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Univer's flyout/submenu popups (right-click context menus like "Insert" and
+ * "Table delete") render via a React portal attached near <body>, outside
+ * Univer's own dark/light color scoping. They inherit our body's light-on-dark
+ * theme (--foreground, near-white) instead of Univer's intended dark-on-light
+ * menu text, making menu items like "Insert row above" nearly invisible
+ * against their own white popup background. Univer's popup wrapper always
+ * carries a "univer-z-[...]" stacking-context class — reset color there,
+ * scoped narrowly enough to leave the rest of the site's dark theme alone. */
+[class*="univer-z-"] {
+  color: #1b1c1f;
+}
+
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.text-balance {
+  text-wrap: balance;
 }
