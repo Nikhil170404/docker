@@ -30,13 +30,13 @@ export default function DocsEditorPage() {
         active="docs"
         right={
           <>
-            <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
+            <div className="flex shrink-0 items-center gap-0.5 rounded-md border border-border p-0.5">
               {LINE_SPACINGS.map((s) => (
                 <button
                   key={s.value}
                   title={`${s.label} line spacing`}
                   onClick={() => apiRef.current?.setLineSpacing(s.value)}
-                  className="rounded px-2 py-1 text-xs text-muted transition-colors hover:bg-white/10 hover:text-foreground"
+                  className="shrink-0 rounded px-2 py-1 text-xs text-muted transition-colors hover:bg-white/10 hover:text-foreground"
                 >
                   {s.label}
                 </button>
@@ -44,7 +44,7 @@ export default function DocsEditorPage() {
             </div>
             <button
               onClick={() => apiRef.current?.openHeaderFooter()}
-              className="rounded-md border border-border px-2.5 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
+              className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
             >
               Header &amp; footer
             </button>
