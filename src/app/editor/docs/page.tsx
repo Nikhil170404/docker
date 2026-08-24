@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { Download } from "lucide-react";
+import { Download, FilePlus2 } from "lucide-react";
 import EditorTopBar from "@/components/editors/EditorTopBar";
 import type { DocsEditorHandle, ExportFormat } from "@/components/editors/DocsEditor";
 
@@ -55,6 +55,13 @@ export default function DocsEditorPage() {
               className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
             >
               Header &amp; footer
+            </button>
+            <button
+              onClick={() => apiRef.current?.insertPageBreak()}
+              title="Insert a page break at the cursor"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
+            >
+              <FilePlus2 size={13} /> New page
             </button>
             <div className="relative shrink-0">
               <button

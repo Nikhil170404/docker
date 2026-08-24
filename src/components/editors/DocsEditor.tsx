@@ -11,7 +11,7 @@ import UniverPresetDocsHyperLinkEnUS from "@univerjs/preset-docs-hyper-link/loca
 import { UniverDocsThreadCommentPreset } from "@univerjs/preset-docs-thread-comment";
 import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comment/locales/en-US";
 import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
-import { DocumentFlavor, ICommandService, validateDocumentStructure } from "@univerjs/core";
+import { CommandType, DocumentFlavor, ICommandService, SectionType, validateDocumentStructure } from "@univerjs/core";
 import type { IDocumentData, Injector } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService } from "@univerjs/docs";
 import { DocSelectionRenderService } from "@univerjs/docs-ui";
@@ -43,6 +43,7 @@ export type DocsEditorHandle = {
   openHeaderFooter: () => void;
   setLineSpacing: (lineSpacing: number) => void;
   exportDocument: (format: ExportFormat) => void;
+  insertPageBreak: () => void;
 };
 
 export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEditorHandle | null> }) {
@@ -51,6 +52,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
   const commandServiceRef = useRef<ICommandService | null>(null);
   const enterHeaderEditModeRef = useRef<() => void>(() => {});
   const exportDocumentRef = useRef<(format: ExportFormat) => void>(() => {});
+  const insertPageBreakRef = useRef<() => void>(() => {});
   // Typing into the ribbon (a border width, a row height) steals focus from
   // the canvas, which clears Univer's live rect-range selection before the
   // "Apply" click can read it. This tracks the last real table-cell
@@ -117,6 +119,45 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     ALL_TABLE_STYLE_COMMANDS.forEach((cmd) => commandService.registerCommand(cmd));
     commandServiceRef.current = commandService;
 
+    // Univer's own right-click "Section Settings" > section-break submenu
+    // (Continuous / Next page / Next column / Even page / Odd page) invokes
+    // commandService.executeCommand() with these exact menu ids directly —
+    // confirmed from the crash it throws otherwise: `[CommandService]:
+    // command "doc.menu.section-break.continuous" is not registered.` The
+    // menu is real UI shipped by docs-ui; only the command handlers behind
+    // it are missing in this version. Wire them to the public
+    // insertSectionBreak facade method (same offset + forceRelayout
+    // pattern as every other command here) so this native menu actually
+    // works instead of crashing.
+    const sectionBreakCommands: { id: string; nextSectionType: SectionType }[] = [
+      { id: "doc.menu.section-break.continuous", nextSectionType: SectionType.CONTINUOUS },
+      { id: "doc.menu.section-break.next-page", nextSectionType: SectionType.NEXT_PAGE },
+      { id: "doc.menu.section-break.next-column", nextSectionType: SectionType.NEXT_COLUMN },
+      { id: "doc.menu.section-break.even-page", nextSectionType: SectionType.EVEN_PAGE },
+      { id: "doc.menu.section-break.odd-page", nextSectionType: SectionType.ODD_PAGE },
+    ];
+    sectionBreakCommands.forEach(({ id, nextSectionType }) => {
+      commandService.registerCommand({
+        id,
+        type: CommandType.COMMAND,
+        handler: () => {
+          const offset = injector.get(DocSelectionManagerService).getActiveTextRange()?.startOffset;
+          if (offset == null) return false;
+          const section = fDoc.insertSectionBreak(offset, { nextSectionType });
+          if (!section) return false;
+
+          const render = injector.get(IRenderManagerService).getRenderUnitById(fDoc.getId());
+          const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
+          skeleton?.makeDirty(true);
+          skeleton?.calculate();
+          render?.scene.makeDirty(true);
+          render?.mainComponent?.makeDirty(true);
+          void render?.scene.requestRender();
+          return true;
+        },
+      });
+    });
+
     // Univer's own "Header & footer" side panel (doc.command.open-header-
     // footer-panel) only ever shows real options when the document's edit
     // focus is ALREADY inside a header/footer — otherwise it just renders
@@ -152,6 +193,31 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       if (format === "word") exportAsWord(snapshot);
       else if (format === "pdf") exportAsPdf(snapshot);
       else exportAsHtml(snapshot);
+    };
+
+    // Word's "Insert > Page Break" (Ctrl+Enter) equivalent. Univer has no
+    // dedicated page-break command, but FDocument.insertColumnBreak's own
+    // docs say it plainly: "In a single-column section, the traditional
+    // renderer advances to the next physical page" — exactly this, since
+    // every document here is single-column TRADITIONAL flavor.
+    insertPageBreakRef.current = () => {
+      const offset = injector.get(DocSelectionManagerService).getActiveTextRange()?.startOffset;
+      if (offset == null) return;
+      fDoc.insertColumnBreak(offset);
+
+      // insertColumnBreak() only updates the data model — without a forced
+      // relayout the canvas keeps hit-testing clicks against the
+      // pre-break skeleton, so a click placed right after using this
+      // button lands at the wrong offset (confirmed: typed text landed at
+      // document start instead of the click point). Same forceRelayout
+      // pattern as every table-style command in table-style-commands.ts.
+      const render = injector.get(IRenderManagerService).getRenderUnitById(fDoc.getId());
+      const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
+      skeleton?.makeDirty(true);
+      skeleton?.calculate();
+      render?.scene.makeDirty(true);
+      render?.mainComponent?.makeDirty(true);
+      void render?.scene.requestRender();
     };
 
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
@@ -230,6 +296,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       commandServiceRef.current = null;
       enterHeaderEditModeRef.current = () => {};
       exportDocumentRef.current = () => {};
+      insertPageBreakRef.current = () => {};
       lastTableRangeRef.current = null;
       setReady(false);
       setTableActive(false);
@@ -252,6 +319,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       // renderer's __getLineHeight source, not documented anywhere.
       runCommand("doc-paragraph-setting.command", { paragraph: { lineSpacing, spacingRule: 0 } }),
     exportDocument: (format: ExportFormat) => exportDocumentRef.current(format),
+    insertPageBreak: () => insertPageBreakRef.current(),
   }));
 
   return (
