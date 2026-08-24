@@ -1,23 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { VerticalAlignmentType } from "@univerjs/core";
-import {
-  AlignVerticalJustifyCenter,
-  AlignVerticalJustifyEnd,
-  AlignVerticalJustifyStart,
-  Columns3,
-  PaintBucket,
-  Rows3,
-  Square,
-  SquareStack,
-} from "lucide-react";
+import { HorizontalAlign, VerticalAlignmentType } from "@univerjs/core";
+import { Columns3, PaintBucket, Rows3, Square, SquareStack, StretchHorizontal } from "lucide-react";
 import {
   SetTableBandedRowsCommandId,
+  SetTableCellAlignCommandId,
   SetTableCellBackgroundCommandId,
   SetTableCellBorderCommandId,
-  SetTableCellVAlignCommandId,
   SetTableColumnWidthCommandId,
+  SetTableFitToWindowCommandId,
   SetTableHeaderRowCommandId,
   SetTableLayoutCommandId,
   SetTableRowHeightCommandId,
@@ -29,12 +21,36 @@ type RunCommand = (id: string, params?: Record<string, unknown>) => void;
 const SWATCHES = ["#FEE2E2", "#FEF3C7", "#DCFCE7", "#DBEAFE", "#EDE9FE", "#FCE7F3", "#F3F4F6", "#111827"];
 const BORDER_SIDES: BorderSide[] = ["Top", "Bottom", "Left", "Right"];
 
+const H_ALIGNS: { label: string; value: HorizontalAlign; items: string }[] = [
+  { label: "Left", value: HorizontalAlign.LEFT, items: "items-start" },
+  { label: "Center", value: HorizontalAlign.CENTER, items: "items-center" },
+  { label: "Right", value: HorizontalAlign.RIGHT, items: "items-end" },
+];
+const V_ALIGNS: { label: string; value: VerticalAlignmentType; justify: string }[] = [
+  { label: "top", value: VerticalAlignmentType.TOP, justify: "justify-start" },
+  { label: "middle", value: VerticalAlignmentType.CENTER, justify: "justify-center" },
+  { label: "bottom", value: VerticalAlignmentType.BOTTOM, justify: "justify-end" },
+];
+
 function GroupLabel({ children }: { children: React.ReactNode }) {
   return <span className="px-1 text-[10px] uppercase tracking-wide text-muted">{children}</span>;
 }
 
 function Divider() {
   return <div className="mx-1 h-8 w-px shrink-0 bg-border" />;
+}
+
+// A tiny "3 lines of text" glyph positioned per h/v combination — the same
+// visual language Word's own cell-alignment picker uses, without needing 9
+// hand-drawn icons.
+function AlignGlyph({ h, v }: { h: string; v: string }) {
+  return (
+    <div className={`flex h-3.5 w-3.5 flex-col gap-[2px] ${v} ${h}`}>
+      <div className="h-[1.5px] w-3 bg-current" />
+      <div className="h-[1.5px] w-2 bg-current" />
+      <div className="h-[1.5px] w-2.5 bg-current" />
+    </div>
+  );
 }
 
 export default function TableRibbon({ run, active }: { run: RunCommand; active: boolean }) {
@@ -157,32 +173,23 @@ export default function TableRibbon({ run, active }: { run: RunCommand; active: 
 
         <Divider />
 
-        {/* Vertical align */}
+        {/* Cell alignment: 3x3 grid (horizontal x vertical) */}
         <div className="flex flex-col items-center gap-1 px-1">
-          <div className="flex items-center gap-1">
-            <button
-              className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted hover:text-foreground"
-              title="Align top"
-              onClick={() => run(SetTableCellVAlignCommandId, { vAlign: VerticalAlignmentType.TOP })}
-            >
-              <AlignVerticalJustifyStart size={14} />
-            </button>
-            <button
-              className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted hover:text-foreground"
-              title="Align middle"
-              onClick={() => run(SetTableCellVAlignCommandId, { vAlign: VerticalAlignmentType.CENTER })}
-            >
-              <AlignVerticalJustifyCenter size={14} />
-            </button>
-            <button
-              className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted hover:text-foreground"
-              title="Align bottom"
-              onClick={() => run(SetTableCellVAlignCommandId, { vAlign: VerticalAlignmentType.BOTTOM })}
-            >
-              <AlignVerticalJustifyEnd size={14} />
-            </button>
+          <div className="grid w-20 grid-cols-3 gap-0.5 rounded border border-border p-0.5">
+            {V_ALIGNS.map((v) =>
+              H_ALIGNS.map((h) => (
+                <button
+                  key={`${v.value}-${h.value}`}
+                  className="flex h-6 w-6 items-center justify-center rounded text-muted hover:bg-white/10 hover:text-foreground"
+                  title={`Align ${h.label.toLowerCase()}, ${v.label}`}
+                  onClick={() => run(SetTableCellAlignCommandId, { horizontal: h.value, vertical: v.value })}
+                >
+                  <AlignGlyph h={h.items} v={v.justify} />
+                </button>
+              )),
+            )}
           </div>
-          <GroupLabel>Align</GroupLabel>
+          <GroupLabel>Cell align</GroupLabel>
         </div>
 
         <Divider />
@@ -253,6 +260,13 @@ export default function TableRibbon({ run, active }: { run: RunCommand; active: 
               onClick={() => run(SetTableLayoutCommandId, { layout: "fixed" })}
             >
               <SquareStack size={12} /> Fixed
+            </button>
+            <button
+              className="flex h-6 items-center gap-1 rounded border border-border px-2 text-[11px] text-muted hover:text-foreground"
+              title="Stretch the table to fill the page width"
+              onClick={() => run(SetTableFitToWindowCommandId)}
+            >
+              <StretchHorizontal size={12} /> Window
             </button>
           </div>
           <GroupLabel>Fit</GroupLabel>

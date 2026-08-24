@@ -10,11 +10,13 @@ import type { IRichTextEditingMutationParams } from "@univerjs/docs";
 import {
   BooleanNumber,
   CommandType,
+  HorizontalAlign,
   ICommandService,
   IUniverInstanceService,
   JSONX,
   TableRowHeightRule,
   TableLayoutType,
+  TableSizeType,
   TextX,
   TextXActionType,
   UniverInstanceType,
@@ -22,6 +24,7 @@ import {
 } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, RichTextEditingMutation } from "@univerjs/docs";
 import { IRenderManagerService } from "@univerjs/engine-render";
+import { getCommandSkeleton } from "@univerjs/docs-ui";
 
 // These commands fill a real gap in Univer's open-source Docs table plugin:
 // the data model (ITableCell.backgroundColor/borderTop.../vAlign, ITableRow.trHeight,
@@ -662,13 +665,178 @@ export const MergeTableCellsCommand: ICommand<IMergeTableCellsParams> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Cell alignment (9-way grid: 3 horizontal x 3 vertical)
+// ---------------------------------------------------------------------------
+//
+// Vertical alignment is a table-cell property (existing pattern above).
+// Horizontal alignment of a cell's text is a PARAGRAPH property — Univer
+// has no separate "cell horizontal align," Word doesn't either, it's just
+// the paragraph(s) inside the cell. Finding those paragraphs needs the
+// cell's startIndex/endIndex, which only exists in the layout viewModel
+// (not in tableSource metadata) — same tree-walk verified working by the
+// merge command above. Bundled into one atomic command instead of two
+// separate ones (cell vAlign + native doc.command.align-*) because the
+// native align commands run against Univer's LIVE selection, which the
+// ribbon's own inputs routinely clear (see resolveTableRange's docs) —
+// running both through our own resolved `range` avoids that entirely.
+function findCellRange(
+  accessor: IAccessor,
+  docDataModel: DocumentDataModel,
+  tableId: string,
+  row: number,
+  column: number,
+): { startIndex: number; endIndex: number } | null {
+  const docSkeletonManagerService = getCommandSkeleton(accessor, docDataModel.getUnitId());
+  if (!docSkeletonManagerService) return null;
+  const viewModel = docSkeletonManagerService.getViewModel();
+
+  const body = docDataModel.getBody();
+  const tableMeta = body?.tables?.find((t) => t.tableId === tableId);
+  if (!body || !tableMeta) return null;
+
+  type TableCellNode = { startIndex: number; endIndex: number };
+  type TableRowNode = { children: TableCellNode[] };
+  type TableNode = { startIndex: number; children: TableRowNode[] };
+
+  let tableNode: TableNode | null = null;
+  for (const section of viewModel.getChildren()) {
+    for (const paragraph of section.children) {
+      const node = paragraph.children[0];
+      if (node && node.startIndex === tableMeta.startIndex) {
+        tableNode = node as unknown as TableNode;
+        break;
+      }
+    }
+    if (tableNode) break;
+  }
+  if (!tableNode) return null;
+
+  const cell = tableNode.children[row]?.children[column];
+  return cell ? { startIndex: cell.startIndex, endIndex: cell.endIndex } : null;
+}
+
+export interface ISetTableCellAlignParams {
+  horizontal: HorizontalAlign;
+  vertical: VerticalAlignmentType;
+  range?: SelectedTableRange | null;
+}
+
+export const SetTableCellAlignCommandId = "dockaro.command.table-cell-align";
+
+export const SetTableCellAlignCommand: ICommand<ISetTableCellAlignParams> = {
+  id: SetTableCellAlignCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const range = resolveTableRange(accessor, params.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+    const body = docDataModel.getBody();
+    if (!body?.paragraphs) return false;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const row = table.tableRows[r];
+      if (!row) continue;
+      for (let c = range.startColumn; c <= range.endColumn; c++) {
+        const cell = row.tableCells[c];
+        if (!cell) continue;
+
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "vAlign"],
+          cell.vAlign,
+          params.vertical,
+        );
+
+        const cellRange = findCellRange(accessor, docDataModel, range.tableId, r, c);
+        if (!cellRange) continue;
+        body.paragraphs.forEach((paragraph, pIndex) => {
+          if (paragraph.startIndex < cellRange.startIndex || paragraph.startIndex > cellRange.endIndex) return;
+          setProperty(
+            jsonX,
+            rawActions,
+            ["body", "paragraphs", pIndex, "paragraphStyle", "horizontalAlign"],
+            paragraph.paragraphStyle?.horizontalAlign,
+            params.horizontal,
+          );
+        });
+      }
+    }
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Fit table to window (stretch to the page's content width, evenly)
+// ---------------------------------------------------------------------------
+
+export interface ISetTableFitToWindowParams {
+  range?: SelectedTableRange | null;
+}
+
+export const SetTableFitToWindowCommandId = "dockaro.command.table-fit-to-window";
+
+export const SetTableFitToWindowCommand: ICommand<ISetTableFitToWindowParams> = {
+  id: SetTableFitToWindowCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    const range = resolveTableRange(accessor, params?.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const docStyle = docDataModel.getSnapshot().documentStyle;
+    const pageWidth = docStyle?.pageSize?.width ?? 794;
+    const marginLeft = docStyle?.marginLeft ?? 72;
+    const marginRight = docStyle?.marginRight ?? 72;
+    const contentWidth = Math.max(100, pageWidth - marginLeft - marginRight);
+    const columnCount = table.tableColumns.length || 1;
+    const perColumnWidth = Math.floor(contentWidth / columnCount);
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+
+    setProperty(jsonX, rawActions, ["tableSource", range.tableId, "layout"], table.layout, TableLayoutType.FIXED);
+    setProperty(
+      jsonX,
+      rawActions,
+      ["tableSource", range.tableId, "size"],
+      table.size,
+      { type: TableSizeType.SPECIFIED, width: { v: contentWidth } },
+    );
+
+    table.tableColumns.forEach((col, i) => {
+      setProperty(
+        jsonX,
+        rawActions,
+        ["tableSource", range.tableId, "tableColumns", i, "size"],
+        col.size,
+        { type: TableSizeType.SPECIFIED, width: { v: perColumnWidth } },
+      );
+    });
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
 export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
   SetTableCellBackgroundCommand,
   SetTableCellBorderCommand,
   SetTableCellVAlignCommand,
+  SetTableCellAlignCommand,
   SetTableRowHeightCommand,
   SetTableColumnWidthCommand,
   SetTableLayoutCommand,
+  SetTableFitToWindowCommand,
   SetTableBandedRowsCommand,
   SetTableHeaderRowCommand,
   MergeTableCellsCommand,

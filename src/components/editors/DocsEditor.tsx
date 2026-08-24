@@ -18,6 +18,7 @@ import { DocSelectionRenderService } from "@univerjs/docs-ui";
 import { DocumentEditArea, IRenderManagerService } from "@univerjs/engine-render";
 import { ALL_TABLE_STYLE_COMMANDS, resolveLiveTableRange, type SelectedTableRange } from "@/lib/univer/table-style-commands";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
+import { exportAsHtml, exportAsPdf, exportAsWord } from "@/lib/univer/doc-export";
 import TableRibbon from "./TableRibbon";
 
 const STORAGE_KEY = "docs-default";
@@ -36,9 +37,12 @@ import "@univerjs/preset-docs-drawing/lib/index.css";
 import "@univerjs/preset-docs-hyper-link/lib/index.css";
 import "@univerjs/preset-docs-thread-comment/lib/index.css";
 
+export type ExportFormat = "word" | "pdf" | "html";
+
 export type DocsEditorHandle = {
   openHeaderFooter: () => void;
   setLineSpacing: (lineSpacing: number) => void;
+  exportDocument: (format: ExportFormat) => void;
 };
 
 export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEditorHandle | null> }) {
@@ -46,6 +50,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
   const disposedRef = useRef(false);
   const commandServiceRef = useRef<ICommandService | null>(null);
   const enterHeaderEditModeRef = useRef<() => void>(() => {});
+  const exportDocumentRef = useRef<(format: ExportFormat) => void>(() => {});
   // Typing into the ribbon (a border width, a row height) steals focus from
   // the canvas, which clears Univer's live rect-range selection before the
   // "Apply" click can read it. This tracks the last real table-cell
@@ -142,6 +147,13 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       void render.scene.requestRender();
     };
 
+    exportDocumentRef.current = (format) => {
+      const snapshot = fDoc.save();
+      if (format === "word") exportAsWord(snapshot);
+      else if (format === "pdf") exportAsPdf(snapshot);
+      else exportAsHtml(snapshot);
+    };
+
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
     // keystroke, and flush immediately on refresh/close so the last edit
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
@@ -203,6 +215,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       disposedRef.current = false;
       commandServiceRef.current = null;
       enterHeaderEditModeRef.current = () => {};
+      exportDocumentRef.current = () => {};
       lastTableRangeRef.current = null;
       setReady(false);
       setTableActive(false);
@@ -224,6 +237,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       // so it's invisible) instead of a multiplier — found by reading the
       // renderer's __getLineHeight source, not documented anywhere.
       runCommand("doc-paragraph-setting.command", { paragraph: { lineSpacing, spacingRule: 0 } }),
+    exportDocument: (format: ExportFormat) => exportDocumentRef.current(format),
   }));
 
   return (
