@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { Download, FilePlus2 } from "lucide-react";
 import EditorTopBar from "@/components/editors/EditorTopBar";
@@ -30,7 +31,18 @@ const EXPORT_FORMATS: { label: string; value: ExportFormat }[] = [
 
 export default function DocsEditorPage() {
   const apiRef = useRef<DocsEditorHandle | null>(null);
-  const [exportOpen, setExportOpen] = useState(false);
+  const exportBtnRef = useRef<HTMLButtonElement>(null);
+  const [exportMenuPos, setExportMenuPos] = useState<{ top: number; right: number } | null>(null);
+
+  const toggleExportMenu = () => {
+    if (exportMenuPos) {
+      setExportMenuPos(null);
+      return;
+    }
+    const rect = exportBtnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setExportMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  };
 
   return (
     <>
@@ -63,37 +75,50 @@ export default function DocsEditorPage() {
             >
               <FilePlus2 size={13} /> New page
             </button>
-            <div className="relative shrink-0">
-              <button
-                onClick={() => setExportOpen((v) => !v)}
-                className="flex shrink-0 items-center gap-1.5 rounded-md bg-white px-2.5 py-1.5 text-xs font-medium text-black transition-opacity hover:opacity-90"
-              >
-                <Download size={13} /> Export
-              </button>
-              {exportOpen && (
-                <>
-                  {/* Click-outside catcher — sits behind the menu, above everything else. */}
-                  <div className="fixed inset-0 z-40" onClick={() => setExportOpen(false)} />
-                  <div className="absolute right-0 top-full z-50 mt-1 w-40 rounded-md border border-border bg-surface py-1 shadow-lg">
-                    {EXPORT_FORMATS.map((f) => (
-                      <button
-                        key={f.value}
-                        onClick={() => {
-                          apiRef.current?.exportDocument(f.value);
-                          setExportOpen(false);
-                        }}
-                        className="block w-full px-3 py-1.5 text-left text-xs text-muted transition-colors hover:bg-white/10 hover:text-foreground"
-                      >
-                        {f.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
+            <button
+              ref={exportBtnRef}
+              onClick={toggleExportMenu}
+              className="flex shrink-0 items-center gap-1.5 rounded-md bg-white px-2.5 py-1.5 text-xs font-medium text-black transition-opacity hover:opacity-90"
+            >
+              <Download size={13} /> Export
+            </button>
           </>
         }
       />
+      {/* Rendered via portal, not inside EditorTopBar's own DOM subtree:
+       * the top bar needs overflow-x-auto for horizontal scroll on narrow
+       * screens, and CSS forces overflow-y to the same non-visible
+       * behavior once overflow-x is set — an absolutely-positioned popup
+       * living inside that container gets silently clipped below the
+       * bar's height. Confirmed via elementFromPoint: clicks at the
+       * dropdown's own coordinates were landing on the page behind it,
+       * not the menu — the menu was rendering but functionally
+       * unreachable. Positioning via the button's real screen rect and
+       * portaling to <body> sidesteps the ancestor's clipping entirely. */}
+      {exportMenuPos &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setExportMenuPos(null)} />
+            <div
+              className="fixed z-50 w-40 rounded-md border border-border bg-surface py-1 shadow-lg"
+              style={{ top: exportMenuPos.top, right: exportMenuPos.right }}
+            >
+              {EXPORT_FORMATS.map((f) => (
+                <button
+                  key={f.value}
+                  onClick={() => {
+                    apiRef.current?.exportDocument(f.value);
+                    setExportMenuPos(null);
+                  }}
+                  className="block w-full px-3 py-1.5 text-left text-xs text-muted transition-colors hover:bg-white/10 hover:text-foreground"
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </>,
+          document.body,
+        )}
       <div className="flex-1 overflow-hidden">
         <DocsEditor apiRef={apiRef} />
       </div>

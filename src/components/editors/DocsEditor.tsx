@@ -218,6 +218,29 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       render?.scene.makeDirty(true);
       render?.mainComponent?.makeDirty(true);
       void render?.scene.requestRender();
+
+      // Without this, the cursor's data-model position never actually
+      // moves past the break, so nothing tells the viewport to scroll —
+      // the new page exists but sits off-screen below the fold with no
+      // indication anything happened unless the user manually scrolls
+      // down (confirmed: this is exactly what made repeated clicks look
+      // like "nothing happens" in testing). Moving the selection here
+      // matches what normal typing does automatically when the cursor
+      // reaches the bottom of the visible viewport.
+      fDoc.setSelection(offset + 1, offset + 1);
+
+      // setSelection only moves Univer's internal model of where the
+      // cursor is — actual DOM focus stays on this <button> after a
+      // click, same as any HTML button. Confirmed by reproducing exactly
+      // what a user hitting this button then typing would see: every
+      // space bar press re-activates the button (native behavior for a
+      // focused <button>) instead of typing a space, so "New Page" typed
+      // right after clicking produced 5 more page breaks, not text.
+      // Univer's own editable surface is a contenteditable div inside our
+      // container — move real focus there so typing lands in the
+      // document again, matching what a click into the canvas does.
+      const editable = containerRef.current?.querySelector<HTMLElement>('[contenteditable="true"]');
+      editable?.focus();
     };
 
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
