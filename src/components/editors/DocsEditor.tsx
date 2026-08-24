@@ -13,7 +13,9 @@ import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comm
 import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
 import { DocumentFlavor, ICommandService, validateDocumentStructure } from "@univerjs/core";
 import type { IDocumentData, Injector } from "@univerjs/core";
-import { DocSelectionManagerService } from "@univerjs/docs";
+import { DocSelectionManagerService, DocSkeletonManagerService } from "@univerjs/docs";
+import { DocSelectionRenderService } from "@univerjs/docs-ui";
+import { DocumentEditArea, IRenderManagerService } from "@univerjs/engine-render";
 import { ALL_TABLE_STYLE_COMMANDS, resolveLiveTableRange, type SelectedTableRange } from "@/lib/univer/table-style-commands";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
 import TableRibbon from "./TableRibbon";
@@ -43,6 +45,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
   const commandServiceRef = useRef<ICommandService | null>(null);
+  const enterHeaderEditModeRef = useRef<() => void>(() => {});
   // Typing into the ribbon (a border width, a row height) steals focus from
   // the canvas, which clears Univer's live rect-range selection before the
   // "Apply" click can read it. This tracks the last real table-cell
@@ -109,6 +112,36 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     ALL_TABLE_STYLE_COMMANDS.forEach((cmd) => commandService.registerCommand(cmd));
     commandServiceRef.current = commandService;
 
+    // Univer's own "Header & footer" side panel (doc.command.open-header-
+    // footer-panel) only ever shows real options when the document's edit
+    // focus is ALREADY inside a header/footer — otherwise it just renders
+    // "Header & footer settings are disabled" (confirmed by reading
+    // DocHeaderFooterPanel's source: it checks
+    // viewModel.getEditArea() !== DocumentEditArea.BODY). It's a contextual
+    // settings panel, not an entry point — Univer's own way in is double-
+    // clicking the page's top margin. This replicates that entry
+    // programmatically so our toolbar button is actually useful in one
+    // click: ensure a header segment exists (public facade API), then
+    // move the same edit-area/segment state double-click sets.
+    enterHeaderEditModeRef.current = () => {
+      const unitId = fDoc.getId();
+      const headerSegmentId = fDoc.ensurePageHeader(0);
+      const render = injector.get(IRenderManagerService).getRenderUnitById(unitId);
+      if (!render) return;
+
+      render.with(DocSkeletonManagerService).getViewModel().setEditArea(DocumentEditArea.HEADER);
+      const selectionRenderService = render.with(DocSelectionRenderService);
+      selectionRenderService.setSegment(headerSegmentId);
+      selectionRenderService.setSegmentPage(0);
+
+      const skeleton = render.with(DocSkeletonManagerService).getSkeleton();
+      skeleton?.makeDirty(true);
+      skeleton?.calculate();
+      render.scene.makeDirty(true);
+      render.mainComponent?.makeDirty(true);
+      void render.scene.requestRender();
+    };
+
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
     // keystroke, and flush immediately on refresh/close so the last edit
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
@@ -169,6 +202,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
 
       disposedRef.current = false;
       commandServiceRef.current = null;
+      enterHeaderEditModeRef.current = () => {};
       lastTableRangeRef.current = null;
       setReady(false);
       setTableActive(false);
@@ -183,7 +217,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
   };
 
   useImperativeHandle(apiRef, () => ({
-    openHeaderFooter: () => runCommand("doc.command.open-header-footer-panel"),
+    openHeaderFooter: () => enterHeaderEditModeRef.current(),
     setLineSpacing: (lineSpacing: number) =>
       // spacingRule: 0 = SpacingRule.AUTO. Without it, the renderer treats
       // lineSpacing as an absolute size (clamped to the normal line height,
