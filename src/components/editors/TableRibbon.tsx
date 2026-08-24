@@ -54,6 +54,7 @@ function AlignGlyph({ h, v }: { h: string; v: string }) {
 }
 
 export default function TableRibbon({ run, active }: { run: RunCommand; active: boolean }) {
+  const [shadeColor, setShadeColor] = useState("#6D28D9");
   const [borderColor, setBorderColor] = useState("#111827");
   const [borderWidth, setBorderWidth] = useState(1);
   const [borderSides, setBorderSides] = useState<Set<BorderSide>>(new Set(BORDER_SIDES));
@@ -103,6 +104,16 @@ export default function TableRibbon({ run, active }: { run: RunCommand; active: 
               className="h-5 w-5 shrink-0 rounded border border-border bg-[repeating-linear-gradient(45deg,transparent,transparent_2px,#ef444480_2px,#ef444480_3px)]"
               title="Clear shading"
               onClick={() => run(SetTableCellBackgroundCommandId, { color: null })}
+            />
+            <input
+              type="color"
+              value={shadeColor}
+              onChange={(e) => {
+                setShadeColor(e.target.value);
+                run(SetTableCellBackgroundCommandId, { color: e.target.value });
+              }}
+              className="h-5 w-5 shrink-0 rounded border border-border bg-transparent"
+              title="Custom shading color"
             />
           </div>
           <GroupLabel>Shading</GroupLabel>

@@ -1,4 +1,5 @@
-import type { IDocumentData } from "@univerjs/core";
+import type { IDocumentBody, IDocumentData, IParagraph, ITextRun } from "@univerjs/core";
+import { NAMED_STYLE_MAP } from "@univerjs/core";
 import { convertBodyToHtml } from "@univerjs/docs-ui";
 
 // Real .docx (OOXML) export needs @univerjs-pro/docs-exchange-client — Pro
@@ -22,8 +23,107 @@ function getDocTitle(snapshot: IDocumentData): string {
   return snapshot.title?.trim() || "Untitled document";
 }
 
+// Applying a named style (Heading 1, Title, Subtitle, ...) only ever writes
+// `paragraphStyle.namedStyleType` onto the paragraph — confirmed via
+// debug_heading.js: applying Heading 2 through the real command left
+// `textRuns` completely empty and added no `textStyle` to the paragraph.
+// The bold/size/color every heading visibly gets in the live editor is a
+// pure runtime default the canvas resolves from this same NAMED_STYLE_MAP
+// on the fly; none of it is ever persisted into the document. convertBody-
+// ToHtml has no such runtime fallback — it only emits `class="UniverHeading"
+// aria-level="N"` with no visual styling at all — so every named-style
+// paragraph exports as plain, unstyled text (confirmed: an exported resume
+// with colored Heading 2 section titles opened in Word with those titles
+// in plain black, non-bold text). Synthesizing the same default the canvas
+// already applies, as a textRun, is what makes the export match what the
+// user actually sees on screen.
+function paragraphContentRanges(paragraphs: IParagraph[]): { start: number; end: number; paragraph: IParagraph }[] {
+  const ranges: { start: number; end: number; paragraph: IParagraph }[] = [];
+  let cursor = 0;
+  for (const paragraph of paragraphs) {
+    ranges.push({ start: cursor, end: paragraph.startIndex, paragraph });
+    cursor = paragraph.startIndex + 1;
+  }
+  return ranges;
+}
+
+// Works around a bug in @univerjs/docs-ui's convertBodyToHtml: its inline
+// slicer advances a shared cursor for every textRun in the WHOLE document,
+// not just ones inside the current paragraph/cell. Any textRun located
+// later in the dataStream — even one nowhere near the current slice — force-
+// advances that cursor to the slice's end, silently dropping any plain
+// (unstyled) text that comes before it. Confirmed by exporting a document
+// with several styled headings and plain paragraphs between them: every
+// plain paragraph ahead of a later styled run came out empty. Tiling the
+// textRuns array so every character in the stream is already "covered" by
+// some run sidesteps the bug entirely, since each paragraph's own slice
+// then always finds a fully-intersecting run and never falls through to
+// the buggy trailing-append path. Gaps inside a named-style paragraph get
+// that style's NAMED_STYLE_MAP default instead of a no-op, for the reason
+// above; every other gap gets a no-op {} run same as before.
+function fillTextRunGaps(body: IDocumentBody): ITextRun[] {
+  const { dataStream, textRuns = [], paragraphs = [] } = body;
+  const paragraphRanges = paragraphContentRanges(paragraphs);
+  const sorted = [...textRuns].sort((a, b) => a.st - b.st);
+  const filled: ITextRun[] = [];
+
+  const fillGap = (st: number, ed: number) => {
+    for (const range of paragraphRanges) {
+      const segStart = Math.max(st, range.start);
+      const segEnd = Math.min(ed, range.end);
+      if (segStart >= segEnd) continue;
+      const namedStyleType = range.paragraph.paragraphStyle?.namedStyleType;
+      const defaultStyle = namedStyleType != null ? NAMED_STYLE_MAP[namedStyleType] : null;
+      filled.push({ st: segStart, ed: segEnd, ts: defaultStyle ?? {} });
+    }
+  };
+
+  let cursor = 0;
+  for (const run of sorted) {
+    if (run.st > cursor) fillGap(cursor, run.st);
+    filled.push(run);
+    cursor = Math.max(cursor, run.ed);
+  }
+  if (cursor < dataStream.length) fillGap(cursor, dataStream.length);
+  return filled;
+}
+
+// convertBodyToHtml never emits per-column widths on the <table>/<td>
+// markup — only the table's own overall width. A real document's column
+// widths (set via the table-column-width command, or dragged in the UI)
+// are silently dropped on export: every consumer (a browser, Word) falls
+// back to distributing width evenly across columns, which can badly
+// mismatch what the column-width command actually did to the live
+// document (confirmed: a 5-column table with deliberately uneven widths —
+// narrow date column, wide description column — opened in Word with all
+// columns roughly equal and headers wrapping oddly). A <colgroup> is the
+// standard, Word-compatible way to carry column widths independent of
+// individual cells, and matches what Word's own "Save as Web Page" emits
+// for a table with custom column widths.
+function injectColumnWidths(html: string, snapshot: IDocumentData): string {
+  const tableRanges = snapshot.body?.tables ?? [];
+  const tableSource = snapshot.tableSource ?? {};
+  let tableIndex = 0;
+  return html.replace(/<table class="MsoNormalTable UniverTable"([^>]*)><tbody>/g, (match, attrs: string) => {
+    const tableRange = tableRanges[tableIndex++];
+    const table = tableRange ? tableSource[tableRange.tableId] : undefined;
+    const widths = table?.tableColumns
+      ?.map((c) => c.size?.width?.v)
+      .filter((w): w is number => typeof w === "number");
+    if (!widths || widths.length === 0) return match;
+    const colgroup = `<colgroup>${widths.map((w) => `<col style="width: ${w}px;">`).join("")}</colgroup>`;
+    return `<table class="MsoNormalTable UniverTable"${attrs}>${colgroup}<tbody>`;
+  });
+}
+
 function buildHtmlBody(snapshot: IDocumentData): string {
-  return convertBodyToHtml(snapshot);
+  const body = snapshot.body;
+  if (!body) return convertBodyToHtml(snapshot);
+  const patched: IDocumentData = {
+    ...snapshot,
+    body: { ...body, textRuns: fillTextRunGaps(body) },
+  };
+  return injectColumnWidths(convertBodyToHtml(patched), snapshot);
 }
 
 function buildPageCss(snapshot: IDocumentData) {
@@ -61,6 +161,7 @@ export function exportAsHtml(snapshot: IDocumentData) {
 <title>${escapeHtml(title)}</title>
 <style>
   body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; max-width: 800px; margin: 40px auto; }
+  p.UniverNormal, p.UniverHeading { margin: 0; }
   table.UniverTable { border-collapse: collapse; }
   table.UniverTable td.UniverTableCell { border: 1px solid #ccc; padding: 4px 8px; }
 </style>
@@ -99,6 +200,7 @@ export function exportAsWord(snapshot: IDocumentData) {
     margin: ${marginTop} ${marginRight} ${marginBottom} ${marginLeft};
   }
   body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; }
+  p.UniverNormal, p.UniverHeading { margin: 0; }
   table.UniverTable { border-collapse: collapse; }
   table.UniverTable td.UniverTableCell { border: 1px solid #999; padding: 4px 8px; }
 </style>
@@ -129,6 +231,7 @@ export function exportAsPdf(snapshot: IDocumentData) {
     margin: ${marginTop} ${marginRight} ${marginBottom} ${marginLeft};
   }
   body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; margin: 0; }
+  p.UniverNormal, p.UniverHeading { margin: 0; }
   table.UniverTable { border-collapse: collapse; }
   table.UniverTable td.UniverTableCell { border: 1px solid #999; padding: 4px 8px; }
 </style>
