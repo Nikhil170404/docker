@@ -7,14 +7,12 @@ import {
   AlignVerticalJustifyEnd,
   AlignVerticalJustifyStart,
   Columns3,
-  Combine,
   PaintBucket,
   Rows3,
   Square,
   SquareStack,
 } from "lucide-react";
 import {
-  MergeTableCellsCommandId,
   SetTableBandedRowsCommandId,
   SetTableCellBackgroundCommandId,
   SetTableCellBorderCommandId,
@@ -237,22 +235,6 @@ export default function TableRibbon({ run, active }: { run: RunCommand; active: 
             </button>
           </div>
           <GroupLabel>Column width</GroupLabel>
-        </div>
-
-        <Divider />
-
-        {/* Merge cells */}
-        <div className="flex flex-col items-center gap-1 px-1">
-          <div className="flex items-center gap-1">
-            <button
-              className="flex h-6 items-center gap-1 rounded bg-white px-2 text-[11px] font-medium text-black"
-              onClick={() => run(MergeTableCellsCommandId)}
-              title="Merge selected cells (same row)"
-            >
-              <Combine size={12} /> Merge
-            </button>
-          </div>
-          <GroupLabel>Cells</GroupLabel>
         </div>
 
         <Divider />

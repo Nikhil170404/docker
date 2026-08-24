@@ -10,18 +10,24 @@ import { UniverDocsHyperLinkPreset } from "@univerjs/preset-docs-hyper-link";
 import UniverPresetDocsHyperLinkEnUS from "@univerjs/preset-docs-hyper-link/locales/en-US";
 import { UniverDocsThreadCommentPreset } from "@univerjs/preset-docs-thread-comment";
 import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comment/locales/en-US";
-import { ICommandService, JSONX, TextX, TextXActionType } from "@univerjs/core";
-import type { IDocumentData, IMutationInfo, Injector, JSONXActions } from "@univerjs/core";
-import { DocSelectionManagerService, RichTextEditingMutation } from "@univerjs/docs";
-import type { IRichTextEditingMutationParams } from "@univerjs/docs";
-import { IRenderManagerService } from "@univerjs/engine-render";
-import { DocSkeletonManagerService } from "@univerjs/docs";
-import { ALL_TABLE_STYLE_COMMANDS, type SelectedTableRange } from "@/lib/univer/table-style-commands";
-import { loadSnapshot, saveSnapshot } from "@/lib/univer/persistence";
+import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
+import { DocumentFlavor, ICommandService, validateDocumentStructure } from "@univerjs/core";
+import type { IDocumentData, Injector } from "@univerjs/core";
+import { DocSelectionManagerService } from "@univerjs/docs";
+import { ALL_TABLE_STYLE_COMMANDS, resolveLiveTableRange, type SelectedTableRange } from "@/lib/univer/table-style-commands";
+import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
 import TableRibbon from "./TableRibbon";
 
 const STORAGE_KEY = "docs-default";
 const AUTOSAVE_DELAY_MS = 600;
+// A4 at 96 DPI. Traditional flavor is what unlocks Word-compatible real
+// pagination (page breaks, ruler-visible page bounds) and header/footer
+// editing — both crash on creation-time documentStyle in Univer 0.25.x but
+// work cleanly as of 1.0.0-beta.2.
+const DEFAULT_DOCUMENT_STYLE = {
+  pageSize: { width: 794, height: 1123 },
+  documentFlavor: DocumentFlavor.TRADITIONAL,
+};
 
 import "@univerjs/preset-docs-core/lib/index.css";
 import "@univerjs/preset-docs-drawing/lib/index.css";
@@ -65,69 +71,43 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
         UniverDocsHyperLinkPreset(),
         UniverDocsThreadCommentPreset(),
       ],
+      plugins: [UniverDocsFindReplacePlugin],
     });
 
-    // NOTE: any custom `documentStyle` passed into createUniverDoc() crashes
-    // this Univer version with 5 identical uncaught errors
-    // (getDataModel/dirty$/onScrollAfter$/transformer not init) — confirmed
-    // with two unrelated overrides (documentFlavor: TRADITIONAL to unlock
-    // header/footer editing, and an explicit A4 pageSize to force real
-    // pagination instead of one endlessly-growing page). Same crash
-    // signature both times, so it's not either feature specifically — it's
-    // documentStyle initialization itself that's broken in this
-    // version/preset combination. Left at the bare default deliberately.
-    // Revisit if a newer Univer version fixes this upstream.
-    const saved = loadSnapshot<Partial<IDocumentData>>(STORAGE_KEY);
-    const fDoc = univerAPI.createDocument(saved ?? {});
+    // Docs saved before the 1.0.0-beta.2 upgrade won't have a documentStyle
+    // (it used to crash at creation time in 0.25.x — see git history), so
+    // they'd silently lose pagination/header-footer on load. Backfill it
+    // for any saved doc that predates this, without touching its content.
+    let saved = loadSnapshot<Partial<IDocumentData>>(STORAGE_KEY);
+
+    // 1.0.0-beta.2 added a strict structural-integrity check that now runs
+    // on every edit (table start/end tokens, section IDs, etc.) and throws
+    // if violated — Univer 0.25.x never validated this, so a doc edited
+    // under the old version (in particular through our own dataStream-
+    // editing MergeTableCellsCommand) can carry corruption that only
+    // surfaces now, crashing on the very first edit after load. Check
+    // before handing anything to createDocument(): a corrupt snapshot is
+    // backed up under its own key (nothing is silently destroyed) and the
+    // editor falls back to a fresh document instead of hard-crashing.
+    if (saved?.body) {
+      const issues = validateDocumentStructure(saved as Pick<IDocumentData, "body" | "headers" | "footers">);
+      if (issues.length > 0) {
+        console.warn("[DocKaro] Saved document failed structure validation, starting fresh:", issues);
+        saveSnapshot(`${STORAGE_KEY}.corrupted.${Date.now()}`, saved);
+        clearSnapshot(STORAGE_KEY);
+        saved = null;
+      }
+    }
+
+    const initialData: Partial<IDocumentData> = saved
+      ? { ...saved, documentStyle: { ...DEFAULT_DOCUMENT_STYLE, ...saved.documentStyle } }
+      : { documentStyle: DEFAULT_DOCUMENT_STYLE };
+    const fDoc = univerAPI.createDocument(initialData);
 
     const injector = univer.__getInjector() as Injector;
     const commandService = injector.get(ICommandService);
     ALL_TABLE_STYLE_COMMANDS.forEach((cmd) => commandService.registerCommand(cmd));
     commandServiceRef.current = commandService;
-
-    // Passing pageSize at createUniverDoc() time crashes this Univer
-    // version (see note above). Patching it as a property mutation AFTER
-    // creation avoids the crash (same safe JSONX pattern as every
-    // table-style command) — but it does NOT make the editor paginate.
-    // Tested with 60 lines of content: still one continuously-growing
-    // page, no page-break gap anywhere, with or without this patch.
-    // Pagination genuinely isn't reachable in this Univer version/preset
-    // combination via either creation-time or post-creation config —
-    // confirmed, not assumed. Kept anyway because a correct pageSize.width
-    // still feeds other subsystems correctly (e.g. table auto-fit column
-    // width, which falls back to a hardcoded 800 when pageSize is unset).
-    const snapshot = fDoc.save();
-    if (!snapshot.documentStyle?.pageSize) {
-      const jsonX = JSONX.getInstance();
-      const rawActions: JSONXActions[] = [];
-      const newPageSize = { width: 794, height: 1123 };
-      const op = jsonX.insertOp(["documentStyle", "pageSize"], newPageSize);
-      if (op) rawActions.push(op as JSONXActions);
-
-      const bodyLength = snapshot.body?.dataStream.length ?? 0;
-      if (bodyLength > 0) {
-        const textX = new TextX();
-        textX.push({ t: TextXActionType.RETAIN, len: bodyLength });
-        const editOp = jsonX.editOp(textX.serialize(), ["body"]);
-        if (editOp) rawActions.push(editOp as JSONXActions);
-      }
-
-      const actions = rawActions.reduce((acc, cur) => JSONX.compose(acc, cur), null as JSONXActions);
-      const doMutation: IMutationInfo<IRichTextEditingMutationParams> = {
-        id: RichTextEditingMutation.id,
-        params: { unitId: fDoc.getId(), actions, textRanges: [] },
-      };
-      commandService.syncExecuteCommand(doMutation.id, doMutation.params);
-
-      const renderManagerService = injector.get(IRenderManagerService);
-      const render = renderManagerService.getRenderUnitById(fDoc.getId());
-      const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
-      skeleton?.makeDirty(true);
-      skeleton?.calculate();
-      render?.scene.makeDirty(true);
-      render?.mainComponent?.makeDirty(true);
-      void render?.scene.requestRender();
-    }
 
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
     // keystroke, and flush immediately on refresh/close so the last edit
@@ -142,8 +122,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
 
     const docSelectionManagerService = injector.get(DocSelectionManagerService);
     const subscription = docSelectionManagerService.textSelection$.subscribe(() => {
-      const rectRanges = docSelectionManagerService.getRectRanges();
-      const range = rectRanges?.find((r) => r.tableId);
+      const range = resolveLiveTableRange(docSelectionManagerService);
 
       // Reflect the CURRENT selection exactly, like Word's Table Tools tab —
       // show only while the selection is actually a table range, hide the
@@ -153,13 +132,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       setTableActive(Boolean(range));
 
       if (range) {
-        lastTableRangeRef.current = {
-          tableId: range.tableId,
-          startRow: Math.min(range.startRow, range.endRow),
-          endRow: Math.max(range.startRow, range.endRow),
-          startColumn: Math.min(range.startColumn, range.endColumn),
-          endColumn: Math.max(range.startColumn, range.endColumn),
-        };
+        lastTableRangeRef.current = range;
       }
     });
 

@@ -22,7 +22,6 @@ import {
 } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, RichTextEditingMutation } from "@univerjs/docs";
 import { IRenderManagerService } from "@univerjs/engine-render";
-import { getCommandSkeleton } from "@univerjs/docs-ui";
 
 // These commands fill a real gap in Univer's open-source Docs table plugin:
 // the data model (ITableCell.backgroundColor/borderTop.../vAlign, ITableRow.trHeight,
@@ -42,27 +41,62 @@ export type SelectedTableRange = {
   endColumn: number;
 };
 
+// A caret merely positioned inside one cell (no drag-selected block) never
+// produces a rectRange — confirmed in 1.0.0-beta.2, where a plain click
+// into a cell yields getRectRanges() === []. Table identity for a plain
+// caret only shows up in getDocRanges()'s startNodePosition.path, shaped
+// like ["pages", 0, "skeTables", tableId, "rows", r, "cells", c, ...].
+function extractTableCellFromPath(
+  path: (string | number)[] | undefined,
+): { tableId: string; row: number; column: number } | null {
+  if (!path) return null;
+  const tablesIdx = path.indexOf("skeTables");
+  if (tablesIdx === -1) return null;
+  const tableId = path[tablesIdx + 1];
+  const rowsIdx = path.indexOf("rows", tablesIdx);
+  const cellsIdx = path.indexOf("cells", tablesIdx);
+  const row = rowsIdx === -1 ? undefined : path[rowsIdx + 1];
+  const column = cellsIdx === -1 ? undefined : path[cellsIdx + 1];
+  if (typeof tableId !== "string" || typeof row !== "number" || typeof column !== "number") return null;
+  return { tableId, row, column };
+}
+
+// The single source of truth for "what table cell(s) is the user's live
+// selection touching right now" — used both as the command-side fallback
+// below and by DocsEditor's selection subscription that drives the Table
+// Design ribbon's visibility.
+export function resolveLiveTableRange(
+  docSelectionManagerService: DocSelectionManagerService,
+): SelectedTableRange | null {
+  const rectRanges = docSelectionManagerService.getRectRanges();
+  const rectRange = rectRanges?.find((r) => r.tableId);
+  if (rectRange) {
+    return {
+      tableId: rectRange.tableId,
+      startRow: Math.min(rectRange.startRow, rectRange.endRow),
+      endRow: Math.max(rectRange.startRow, rectRange.endRow),
+      startColumn: Math.min(rectRange.startColumn, rectRange.endColumn),
+      endColumn: Math.max(rectRange.startColumn, rectRange.endColumn),
+    };
+  }
+
+  const docRanges = docSelectionManagerService.getDocRanges();
+  const cell = extractTableCellFromPath(docRanges?.[0]?.startNodePosition?.path);
+  if (!cell) return null;
+
+  return { tableId: cell.tableId, startRow: cell.row, endRow: cell.row, startColumn: cell.column, endColumn: cell.column };
+}
+
 // Focusing any input outside the canvas (typing a border width, a row
-// height...) clears Univer's live rect-range selection before the button
-// click that applies it ever fires. Every command below therefore accepts
-// an explicit `range` in its params — captured by the panel from a
-// selection-change subscription while the selection was still live — and
-// only falls back to querying live selection when one isn't provided.
+// height...) clears Univer's live selection before the button click that
+// applies it ever fires. Every command below therefore accepts an explicit
+// `range` in its params — captured by the panel from a selection-change
+// subscription while the selection was still live — and only falls back to
+// querying live selection when one isn't provided.
 function resolveTableRange(accessor: IAccessor, explicit?: SelectedTableRange | null): SelectedTableRange | null {
   if (explicit) return explicit;
-
   const docSelectionManagerService = accessor.get(DocSelectionManagerService);
-  const rectRanges = docSelectionManagerService.getRectRanges();
-  const range = rectRanges?.find((r) => r.tableId);
-  if (!range) return null;
-
-  return {
-    tableId: range.tableId,
-    startRow: Math.min(range.startRow, range.endRow),
-    endRow: Math.max(range.startRow, range.endRow),
-    startColumn: Math.min(range.startColumn, range.endColumn),
-    endColumn: Math.max(range.startColumn, range.endColumn),
-  };
+  return resolveLiveTableRange(docSelectionManagerService);
 }
 
 function getDocAndTable(accessor: IAccessor, tableId: string) {
@@ -545,22 +579,38 @@ export const SetTableHeaderRowCommand: ICommand<ISetTableHeaderRowParams> = {
 // Merge cells (horizontal, same row only)
 // ---------------------------------------------------------------------------
 //
-// Unlike every command above, this touches the document's text stream, not
-// just a property — merging cells means removing the absorbed cells'
-// content from the dataStream, not just marking them merged. Adapted
-// directly from Univer's own DocTableDeleteColumnsCommand (fetched from
-// their GitHub source): same tree-walk to find each cell's exact
-// startIndex/endIndex, same textX RETAIN+DELETE pattern, same right-to-left
-// removeOp order to keep earlier indices stable during removal. The one
-// difference from delete-columns: this only touches ONE row (the selected
-// row), and instead of also removing the column definitions, it sets
-// columnSpan on the surviving (leftmost) cell.
+// NOTE: this command is data-correct but deliberately not wired into
+// TableRibbon's UI right now. Root-caused against Univer's own layout
+// engine source (engine-render/src/components/docs/layout/block/table.ts):
+// a merge is represented by leaving the absorbed cell IN PLACE with
+// columnSpan set to 0 (isCoveredTableCell checks `columnSpan === 0`) while
+// the anchor cell's columnSpan is set to the spanned count — confirmed
+// correct, and confirmed to update the persisted snapshot correctly. BUT
+// the only span-aware sizing function in that file, applyMergedCellSpanHeights,
+// computes height for rowSpan and has no width-equivalent for columnSpan —
+// so the anchor cell's box never actually widens on screen. The covered
+// cell's content/background/border correctly stop painting
+// (_drawTable/_drawTableCellBackgrounds in engine-render's document.ts both
+// check isMergedCellCovered), it just leaves a visually blank gap instead
+// of a wider cell. This is a genuine gap in this Univer version's table
+// renderer, not fixable from application code — revisit if a newer Univer
+// release adds column-span width handling. Kept here (unused) since the
+// data model side is correct and this becomes a one-line UI change
+// (re-add the Merge button in TableRibbon) once upstream catches up.
 //
-// Scoped to a single row deliberately — merging across multiple rows needs
-// the same per-row offset bookkeeping delete-columns does when it spans all
-// rows, which is meaningfully more moving parts to get right. Splitting a
-// merged cell back apart is the mirror image (TextX INSERT + jsonX
-// insertOp) and is realistic future follow-up work, not included here.
+// An earlier version of this command instead deleted the absorbed cells'
+// dataStream content and removed them from the tableCells array (mirroring
+// Univer's DocTableDeleteColumnsCommand). That passed Univer's own
+// structural-integrity checks but silently failed to render — array
+// removal desyncs a row's cell count from its sibling rows and from
+// tableColumns, which the layout engine doesn't expect. Property-only
+// edits (this version) avoid that whole class of problem and match every
+// other command in this file's low-risk category.
+//
+// Scoped to a single row deliberately — a real rowSpan merge needs the
+// same columnSpan-style tombstoning applied per-row, which is realistic
+// follow-up work, not included here. Splitting a merged cell back apart is
+// the mirror image (columnSpan back to 1 on the tombstoned cells).
 
 export interface IMergeTableCellsParams {
   range?: SelectedTableRange | null;
@@ -577,67 +627,34 @@ export const MergeTableCellsCommand: ICommand<IMergeTableCellsParams> = {
     if (range.startRow !== range.endRow) return false;
     if (range.startColumn === range.endColumn) return false;
 
-    const univerInstanceService = accessor.get(IUniverInstanceService);
-    const docDataModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
-      UniverInstanceType.UNIVER_DOC,
-    );
-    if (!docDataModel) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
 
-    const docSkeletonManagerService = getCommandSkeleton(accessor, docDataModel.getUnitId());
-    if (!docSkeletonManagerService) return false;
-    const viewModel = docSkeletonManagerService.getViewModel();
-
-    const body = docDataModel.getBody();
-    const tableMeta = body?.tables?.find((t) => t.tableId === range.tableId);
-    if (!body || !tableMeta) return false;
-
-    type TableCellNode = { startIndex: number; endIndex: number };
-    type TableRowNode = { children: TableCellNode[] };
-    type TableNode = { startIndex: number; children: TableRowNode[] };
-
-    let tableNode: TableNode | null = null;
-    for (const section of viewModel.getChildren()) {
-      for (const paragraph of section.children) {
-        const node = paragraph.children[0];
-        if (node && node.startIndex === tableMeta.startIndex) {
-          tableNode = node as unknown as TableNode;
-          break;
-        }
-      }
-      if (tableNode) break;
-    }
-    if (!tableNode) return false;
-
-    const row = tableNode.children[range.startRow];
-    const firstCellToRemove = row?.children[range.startColumn + 1];
-    const lastCellToRemove = row?.children[range.endColumn];
-    if (!firstCellToRemove || !lastCellToRemove) return false;
+    const row = table.tableRows[range.startRow];
+    const anchorCell = row?.tableCells[range.startColumn];
+    if (!row || !anchorCell) return false;
 
     const jsonX = JSONX.getInstance();
     const rawActions: JSONXActions[] = [];
 
-    const textX = new TextX();
-    const retainLen = firstCellToRemove.startIndex;
-    const deleteLen = lastCellToRemove.endIndex - firstCellToRemove.startIndex + 1;
-    if (retainLen > 0) textX.push({ t: TextXActionType.RETAIN, len: retainLen });
-    textX.push({ t: TextXActionType.DELETE, len: deleteLen });
-    const editOp = jsonX.editOp(textX.serialize(), ["body"]);
-    if (editOp) rawActions.push(editOp as JSONXActions);
+    setProperty(
+      jsonX,
+      rawActions,
+      ["tableSource", range.tableId, "tableRows", range.startRow, "tableCells", range.startColumn, "columnSpan"],
+      anchorCell.columnSpan,
+      range.endColumn - range.startColumn + 1,
+    );
 
-    for (let c = range.endColumn; c > range.startColumn; c--) {
-      const op = jsonX.removeOp(["tableSource", range.tableId, "tableRows", range.startRow, "tableCells", c]);
-      if (op) rawActions.push(op as JSONXActions);
-    }
-
-    const table = docDataModel.getSnapshot().tableSource?.[range.tableId];
-    const anchorCell = table?.tableRows[range.startRow]?.tableCells[range.startColumn];
-    if (anchorCell) {
+    for (let c = range.startColumn + 1; c <= range.endColumn; c++) {
+      const cell = row.tableCells[c];
+      if (!cell) continue;
       setProperty(
         jsonX,
         rawActions,
-        ["tableSource", range.tableId, "tableRows", range.startRow, "tableCells", range.startColumn, "columnSpan"],
-        anchorCell.columnSpan,
-        range.endColumn - range.startColumn + 1,
+        ["tableSource", range.tableId, "tableRows", range.startRow, "tableCells", c, "columnSpan"],
+        cell.columnSpan,
+        0,
       );
     }
 
