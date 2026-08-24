@@ -78,7 +78,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     // version/preset combination. Left at the bare default deliberately.
     // Revisit if a newer Univer version fixes this upstream.
     const saved = loadSnapshot<Partial<IDocumentData>>(STORAGE_KEY);
-    const fDoc = univerAPI.createUniverDoc(saved ?? {});
+    const fDoc = univerAPI.createDocument(saved ?? {});
 
     const injector = univer.__getInjector() as Injector;
     const commandService = injector.get(ICommandService);
@@ -96,7 +96,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     // confirmed, not assumed. Kept anyway because a correct pageSize.width
     // still feeds other subsystems correctly (e.g. table auto-fit column
     // width, which falls back to a hardcoded 800 when pageSize is unset).
-    const snapshot = fDoc.getSnapshot();
+    const snapshot = fDoc.save();
     if (!snapshot.documentStyle?.pageSize) {
       const jsonX = JSONX.getInstance();
       const rawActions: JSONXActions[] = [];
@@ -120,7 +120,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
       commandService.syncExecuteCommand(doMutation.id, doMutation.params);
 
       const renderManagerService = injector.get(IRenderManagerService);
-      const render = renderManagerService.getRenderById(fDoc.getId());
+      const render = renderManagerService.getRenderUnitById(fDoc.getId());
       const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
       skeleton?.makeDirty(true);
       skeleton?.calculate();
@@ -133,7 +133,7 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     // keystroke, and flush immediately on refresh/close so the last edit
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
-    const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.getSnapshot());
+    const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.save());
     const commandSubscription = commandService.onCommandExecuted(() => {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(flushSave, AUTOSAVE_DELAY_MS);

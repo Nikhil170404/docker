@@ -103,7 +103,7 @@ function setProperty(
 // alone reads the stale cached height. Force a real layout recalculation.
 function forceRelayout(accessor: IAccessor, unitId: string) {
   const renderManagerService = accessor.get(IRenderManagerService);
-  const render = renderManagerService.getRenderById(unitId);
+  const render = renderManagerService.getRenderUnitById(unitId);
   const skeletonManagerService = render?.with(DocSkeletonManagerService);
   const skeleton = skeletonManagerService?.getSkeleton();
   skeleton?.makeDirty(true);
