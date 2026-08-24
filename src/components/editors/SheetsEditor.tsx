@@ -87,11 +87,25 @@ export default function SheetsEditor() {
         if (event.reason?.name === "EmptyError") event.preventDefault();
       };
       window.addEventListener("unhandledrejection", swallowEmptyError);
+
+      // Same race, different symptom: dispose() can synchronously unmount
+      // an internal React root Univer owns (its own toolbar/canvas overlay)
+      // while THIS component's own unmount is still mid-render for the same
+      // commit. React reports that via console.error, not a thrown
+      // exception, so the try/catch below can't see it — only a scoped
+      // console.error filter can. Restored synchronously right after
+      // dispose() returns, so no unrelated error in this window gets lost.
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]) => {
+        if (typeof args[0] === "string" && args[0].includes("synchronously unmount a root")) return;
+        originalConsoleError(...args);
+      };
       try {
         univer.dispose();
       } catch (err) {
         if ((err as Error)?.name !== "EmptyError") throw err;
       } finally {
+        console.error = originalConsoleError;
         setTimeout(() => window.removeEventListener("unhandledrejection", swallowEmptyError), 0);
       }
 
