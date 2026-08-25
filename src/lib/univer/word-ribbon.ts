@@ -1,7 +1,8 @@
-import { UniverInstanceType } from "@univerjs/core";
+import { DashStyleType, UniverInstanceType } from "@univerjs/core";
 import type { IAccessor, IDisposable, Injector } from "@univerjs/core";
 import {
   COLOR_PICKER_COMPONENT,
+  ComponentManager,
   IMenuManagerService,
   IRibbonService,
   IconManager,
@@ -11,7 +12,10 @@ import {
   getMenuHiddenObservable,
 } from "@univerjs/ui";
 import type { IMenuButtonItem, IMenuSelectorItem, IValueOption, MenuSchemaType } from "@univerjs/ui";
+import TableGridPicker, { parseTableSize } from "@/components/editors/TableGridPicker";
 import {
+  CreateDocTableCommand,
+  DocCreateTableOperation,
   DocTableDeleteColumnsCommand,
   DocTableDeleteRowsCommand,
   DocTableDeleteTableCommand,
@@ -22,8 +26,12 @@ import {
 } from "@univerjs/docs-ui";
 import {
   AdjustWidthDoubleIcon,
+  CancelMergeIcon,
+  HorizontalBorderDoubleIcon,
   LineIndentDecreaseIcon,
   LineIndentIncreaseIcon,
+  MergeAllIcon,
+  TableBorderStyleIcon,
   AlignBottomIcon,
   AlignTopIcon,
   AllBorderIcon,
@@ -59,7 +67,9 @@ import {
   SetZoomCommandId,
   PX_PER_INCH,
 } from "./word-commands";
+import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
 import {
+  MergeTableCellsCommandId,
   SetTableBandedRowsCommandId,
   SetTableCellAlignCommandId,
   SetTableCellBackgroundCommandId,
@@ -69,6 +79,7 @@ import {
   SetTableHeaderRowCommandId,
   SetTableLayoutCommandId,
   SetTableRowHeightCommandId,
+  SplitTableCellsCommandId,
   type BorderSide,
 } from "./table-style-commands";
 
@@ -104,11 +115,16 @@ const WORD_GROUP = {
   TABLE_ROWS: "ribbon.tableDesign.rows",
 } as const;
 
+/** Registered component id for the Word-style table size grid. */
+const TABLE_GRID_PICKER_COMPONENT = "dockaro.component.table-grid-picker";
+
 const COMMENT_PANEL_COMMAND_ID = "docs.operation.toggle-comment-panel";
 const ADD_COMMENT_COMMAND_ID = "docs.operation.start-add-comment";
 /** Univer's own items that Word keeps on other tabs than Univer does. */
 export const HEADER_FOOTER_PANEL_COMMAND_ID = "doc.command.open-header-footer-panel";
 export const PAGE_SETTING_COMMAND_ID = "docs.operation.open-page-setting";
+/** Univer's own Table button, replaced here by Word's size grid. */
+export const UNIVER_TABLE_MENU_ID = "doc.menu.table";
 
 /**
  * Tab names, and titles for every control this app adds. Univer's own
@@ -169,13 +185,24 @@ export const WORD_UI_LOCALE = {
     view: {
       zoom: "Zoom",
     },
+    insert: {
+      table: "Table",
+      tableDialog: "Insert table...",
+    },
     table: {
       title: "Table Design",
       titleDesc: "Shading, borders and cell layout for the selected table.",
       shading: "Shading",
       shadingClear: "No shading",
       borders: "Borders",
-      borderColor: "Border color",
+      borderColor: "Pen color",
+      borderStyle: "Line style",
+      borderWeight: "Line weight",
+      borderSolid: "Solid",
+      borderDashed: "Dashed",
+      borderDotted: "Dotted",
+      merge: "Merge cells",
+      split: "Split cells",
       bordersAll: "All borders",
       bordersNone: "No border",
       borderTop: "Top border",
@@ -210,6 +237,10 @@ export const WORD_UI_LOCALE = {
 /** Icons this app's ribbon items use that Univer doesn't already register. */
 const WORD_ICONS = {
   AdjustWidthDoubleIcon,
+  CancelMergeIcon,
+  HorizontalBorderDoubleIcon,
+  MergeAllIcon,
+  TableBorderStyleIcon,
   // docs-ui imports these two but never registers them, so its own indent
   // menu ids resolve to an empty icon; registering them here fixes both.
   LineIndentDecreaseIcon,
@@ -282,6 +313,22 @@ function option(label: string, params: Record<string, unknown>, icon?: string): 
   return { label, value: label, icon, params: () => params };
 }
 
+/**
+ * A Borders entry. Like Word, it draws with whatever the pen is set to at
+ * the moment it is clicked rather than a fixed colour and weight.
+ */
+function borderOption(label: string, sides: BorderSide[], icon: string): IValueOption {
+  return {
+    label,
+    value: label,
+    icon,
+    params: () => {
+      const pen = getBorderPen();
+      return { sides, color: pen.color, width: pen.width, dashStyle: pen.dashStyle };
+    },
+  };
+}
+
 const LINE_SPACINGS = [1, 1.15, 1.5, 2, 2.5, 3];
 const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
 const ROW_HEIGHTS = [24, 32, 40, 48, 64];
@@ -289,7 +336,6 @@ const COLUMN_WIDTHS = [80, 100, 120, 160, 200];
 /** Word's own "space before/after paragraph" presets, in points. */
 const PARAGRAPH_SPACES = [0, 6, 12, 18];
 const ALL_BORDER_SIDES: BorderSide[] = ["Top", "Bottom", "Left", "Right"];
-const DEFAULT_BORDER = { color: "#000000", width: 1 };
 
 const CELL_ALIGNMENTS: { label: string; icon: string; horizontal: number; vertical: number }[] = [
   // HorizontalAlign LEFT/CENTER/RIGHT = 1/2/3, VerticalAlignmentType TOP/CENTER/BOTTOM = 2/3/4.
@@ -385,6 +431,31 @@ function buildWordMenuSchema(): MenuSchemaType {
     },
 
     [RibbonInsertGroup.MEDIA]: {
+      "dockaro.menu.table": {
+        order: -1,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor): IMenuSelectorItem => ({
+          id: "dockaro.menu.table",
+          commandId: CreateDocTableCommand.id,
+          type: MenuItemType.SUBITEMS,
+          icon: "GridIcon",
+          title: "dockaro.insert.table",
+          tooltip: "dockaro.insert.table",
+          selections: [
+            {
+              label: { name: TABLE_GRID_PICKER_COMPONENT, hoverable: false, selectable: false },
+              params: (value?: string | number) => parseTableSize(value) ?? undefined,
+            },
+            {
+              label: "dockaro.insert.tableDialog",
+              value: "dialog",
+              id: DocCreateTableOperation.id,
+              icon: "GridIcon",
+            },
+          ],
+          hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+        }),
+      },
       [InsertPageBreakCommandId]: {
         order: 10,
         gridLayout: { row: 1, column: 5, rowSpan: 2, showLabel: true },
@@ -644,15 +715,11 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 icon: "AllBorderIcon",
                 title: "dockaro.table.borders",
                 selections: [
-                  option("dockaro.table.bordersAll", { sides: ALL_BORDER_SIDES, ...DEFAULT_BORDER }, "AllBorderIcon"),
-                  option("dockaro.table.borderTop", { sides: ["Top"], ...DEFAULT_BORDER }, "UpBorderDoubleIcon"),
-                  option(
-                    "dockaro.table.borderBottom",
-                    { sides: ["Bottom"], ...DEFAULT_BORDER },
-                    "DownBorderDoubleIcon",
-                  ),
-                  option("dockaro.table.borderLeft", { sides: ["Left"], ...DEFAULT_BORDER }, "LeftBorderDoubleIcon"),
-                  option("dockaro.table.borderRight", { sides: ["Right"], ...DEFAULT_BORDER }, "RightBorderDoubleIcon"),
+                  borderOption("dockaro.table.bordersAll", ALL_BORDER_SIDES, "AllBorderIcon"),
+                  borderOption("dockaro.table.borderTop", ["Top"], "UpBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderBottom", ["Bottom"], "DownBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderLeft", ["Left"], "LeftBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderRight", ["Right"], "RightBorderDoubleIcon"),
                   option(
                     "dockaro.table.bordersNone",
                     { sides: ALL_BORDER_SIDES, color: null, width: 1 },
@@ -661,12 +728,42 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 ],
               }),
           },
-          "dockaro.menu.table-border-color": {
+          "dockaro.menu.border-style": {
             order: 1,
             gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: "dockaro.menu.border-style",
+                commandId: SetBorderPenCommandId,
+                icon: "TableBorderStyleIcon",
+                title: "dockaro.table.borderStyle",
+                selections: [
+                  option("dockaro.table.borderSolid", { dashStyle: DashStyleType.SOLID }),
+                  option("dockaro.table.borderDashed", { dashStyle: DashStyleType.DASH }),
+                  option("dockaro.table.borderDotted", { dashStyle: DashStyleType.DOT }),
+                ],
+              }),
+          },
+          "dockaro.menu.border-weight": {
+            order: 2,
+            gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: "dockaro.menu.border-weight",
+                commandId: SetBorderPenCommandId,
+                icon: "HorizontalBorderDoubleIcon",
+                title: "dockaro.table.borderWeight",
+                selections: BORDER_WEIGHTS.map((points) =>
+                  option(`${points} pt`, { width: pointsToPixels(points) }),
+                ),
+              }),
+          },
+          "dockaro.menu.table-border-color": {
+            order: 3,
+            gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
             menuItemFactory: (accessor: IAccessor): IMenuSelectorItem => ({
               id: "dockaro.menu.table-border-color",
-              commandId: SetTableCellBorderCommandId,
+              commandId: SetBorderPenCommandId,
               type: MenuItemType.SUBITEMS,
               icon: "FontColorDoubleIcon",
               title: "dockaro.table.borderColor",
@@ -674,7 +771,7 @@ function buildRootMenuOverrides(): MenuSchemaType {
               selections: [
                 {
                   label: { name: COLOR_PICKER_COMPONENT, hoverable: false, selectable: false },
-                  params: (value?: string | number) => ({ sides: ALL_BORDER_SIDES, color: value, width: 1 }),
+                  params: (value?: string | number) => ({ color: value }),
                 },
               ],
               hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
@@ -720,6 +817,26 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 icon: "AdjustWidthDoubleIcon",
                 title: "dockaro.table.columnWidth",
                 selections: COLUMN_WIDTHS.map((width) => option(`${width} px`, { width })),
+              }),
+          },
+          [MergeTableCellsCommandId]: {
+            order: 4,
+            gridLayout: { row: 1, column: 5, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              button(accessor, {
+                id: MergeTableCellsCommandId,
+                icon: "MergeAllIcon",
+                title: "dockaro.table.merge",
+              }),
+          },
+          [SplitTableCellsCommandId]: {
+            order: 5,
+            gridLayout: { row: 1, column: 6, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              button(accessor, {
+                id: SplitTableCellsCommandId,
+                icon: "CancelMergeIcon",
+                title: "dockaro.table.split",
               }),
           },
           [SetTableLayoutCommandId]: {
@@ -820,10 +937,12 @@ export interface WordRibbon extends IDisposable {
 
 export function installWordRibbon(injector: Injector): WordRibbon {
   const iconManager = injector.get(IconManager);
+  const componentManager = injector.get(ComponentManager);
   const menuManagerService = injector.get(IMenuManagerService);
   const ribbonService = injector.get(IRibbonService);
 
   const iconDisposable = iconManager.register(WORD_ICONS);
+  const componentDisposable = componentManager.register(TABLE_GRID_PICKER_COMPONENT, TableGridPicker);
   menuManagerService.appendRootMenu(buildRootMenuOverrides());
   menuManagerService.mergeMenu(buildWordMenuSchema());
 
@@ -840,6 +959,7 @@ export function installWordRibbon(injector: Injector): WordRibbon {
     },
     dispose: () => {
       ribbonService.hideAllContextualTabs();
+      componentDisposable.dispose();
       iconDisposable.dispose();
     },
   };
@@ -849,4 +969,5 @@ export function installWordRibbon(injector: Injector): WordRibbon {
 export const RELOCATED_UNIVER_MENU_ITEMS = {
   [HEADER_FOOTER_PANEL_COMMAND_ID]: { hidden: true },
   [PAGE_SETTING_COMMAND_ID]: { hidden: true },
+  [UNIVER_TABLE_MENU_ID]: { hidden: true },
 };

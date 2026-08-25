@@ -9,7 +9,14 @@ import {
   SpacingRule,
   UniverInstanceType,
 } from "@univerjs/core";
-import type { DocumentDataModel, IAccessor, ICommand, IDocumentData, IDocumentStyle, IParagraphStyle } from "@univerjs/core";
+import type {
+  DocumentDataModel,
+  IAccessor,
+  ICommand,
+  IDocumentData,
+  IDocumentStyle,
+  IParagraphStyle,
+} from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService } from "@univerjs/docs";
 import { DocSelectionRenderService } from "@univerjs/docs-ui";
 import { DocumentEditArea, IRenderManagerService } from "@univerjs/engine-render";
@@ -152,7 +159,12 @@ export interface ISetParagraphSpaceParams {
 }
 
 export interface ISetIndentParams {
-  direction: "increase" | "decrease";
+  /** Word's Increase/Decrease Indent buttons: a half-inch step. */
+  direction?: "increase" | "decrease";
+  /** Absolute indents in document pixels, as dragged on the ruler. */
+  indentStart?: number;
+  indentEnd?: number;
+  indentFirstLine?: number;
 }
 
 export interface IExportDocumentParams {
@@ -160,7 +172,11 @@ export interface IExportDocumentParams {
 }
 
 export interface ISetPageMarginsParams {
-  preset: MarginPreset;
+  /** One of Word's Margins presets. */
+  preset?: MarginPreset;
+  /** Explicit margins in document pixels, as dragged on the ruler. */
+  marginLeft?: number;
+  marginRight?: number;
 }
 
 export interface ISetPageOrientationParams {
@@ -209,6 +225,16 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     type: CommandType.COMMAND,
     handler: async (accessor, params) => {
       if (!params) return false;
+      if (!params.direction) {
+        const style: Partial<IParagraphStyle> = {};
+        if (params.indentStart !== undefined) style.indentStart = { v: Math.max(0, params.indentStart) };
+        if (params.indentEnd !== undefined) style.indentEnd = { v: Math.max(0, params.indentEnd) };
+        if (params.indentFirstLine !== undefined) {
+          style.indentFirstLine = { v: Math.max(0, params.indentFirstLine) };
+        }
+        if (Object.keys(style).length === 0) return false;
+        return applyParagraphStyle(accessor, style);
+      }
       const docModel = getDocModel(accessor);
       const offset = getCursorOffset(accessor);
       if (!docModel || offset == null) return false;
@@ -287,6 +313,13 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     type: CommandType.COMMAND,
     handler: async (accessor, params) => {
       if (!params) return false;
+      if (!params.preset) {
+        const patch: Parameters<typeof applyPageSetup>[1] = {};
+        if (params.marginLeft !== undefined) patch.marginLeft = Math.max(0, params.marginLeft);
+        if (params.marginRight !== undefined) patch.marginRight = Math.max(0, params.marginRight);
+        if (Object.keys(patch).length === 0) return false;
+        return applyPageSetup(accessor, patch);
+      }
       const preset = MARGIN_PRESETS[params.preset];
       if (!preset) return false;
       return applyPageSetup(accessor, {

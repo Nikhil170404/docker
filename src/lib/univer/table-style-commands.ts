@@ -10,6 +10,7 @@ import type { IRichTextEditingMutationParams } from "@univerjs/docs";
 import {
   BooleanNumber,
   CommandType,
+  DashStyleType,
   HorizontalAlign,
   ICommandService,
   IUniverInstanceService,
@@ -35,6 +36,11 @@ import { getCommandSkeleton } from "@univerjs/docs-ui";
 // column-width-on-insert logic. Cell merge/split needs dataStream edits too
 // (removing table cells changes the document's text stream) and is intentionally
 // not included here — that's real-but-separate follow-up work.
+
+// Univer's dataStream table tokens, by character code so no control
+// characters end up pasted into the source.
+const TABLE_ROW_START_TOKEN = String.fromCharCode(0x1b);
+const TABLE_CELL_START_TOKEN = String.fromCharCode(0x1c);
 
 export type SelectedTableRange = {
   tableId: string;
@@ -282,6 +288,8 @@ export interface ISetTableCellBorderParams {
   sides: BorderSide[];
   color: string | null;
   width: number;
+  /** Word's "Line Style": solid, dotted or dashed. Solid when omitted. */
+  dashStyle?: DashStyleType;
   range?: SelectedTableRange | null;
 }
 
@@ -311,7 +319,11 @@ export const SetTableCellBorderCommand: ICommand<ISetTableCellBorderParams> = {
         for (const side of params.sides) {
           const key = `border${side}` as const;
           const newVal = params.color
-            ? { color: { rgb: params.color }, width: { v: params.width } }
+            ? {
+                color: { rgb: params.color },
+                width: { v: params.width },
+                dashStyle: params.dashStyle ?? DashStyleType.SOLID,
+              }
             : undefined;
 
           setProperty(
@@ -806,7 +818,75 @@ export const MergeTableCellsCommand: ICommand<IMergeTableCellsParams> = {
       );
     }
 
-    return runMutation(accessor, docDataModel, rawActions);
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    placeCaretInCell(accessor, docDataModel, range.tableId, range.startRow, range.startColumn);
+    return true;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Splitting a merged cell back apart (Word's "Split Cells")
+// ---------------------------------------------------------------------------
+//
+// The mirror image of the merge above: the anchor goes back to spanning one
+// column and every cell it absorbed (marked with a zero span) becomes a
+// normal cell again.
+
+export interface ISplitTableCellsParams {
+  range?: SelectedTableRange | null;
+}
+
+export const SplitTableCellsCommandId = "dockaro.command.table-split-cells";
+
+export const SplitTableCellsCommand: ICommand<ISplitTableCellsParams> = {
+  id: SplitTableCellsCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    const range = resolveTableRange(accessor, params?.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    const anchors: { row: number; column: number }[] = [];
+
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const row = table.tableRows[r];
+      if (!row) continue;
+      // Walk back to the anchor: the caret can sit anywhere in the merged run.
+      let anchorIndex = range.startColumn;
+      while (anchorIndex > 0 && row.tableCells[anchorIndex]?.columnSpan === 0) anchorIndex--;
+      const anchor = row.tableCells[anchorIndex];
+      const span = anchor?.columnSpan ?? 1;
+      if (!anchor || span <= 1) continue;
+
+      setProperty(
+        jsonX,
+        rawActions,
+        ["tableSource", range.tableId, "tableRows", r, "tableCells", anchorIndex, "columnSpan"],
+        anchor.columnSpan,
+        1,
+      );
+      for (let c = anchorIndex + 1; c < anchorIndex + span; c++) {
+        const cell = row.tableCells[c];
+        if (!cell) continue;
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "columnSpan"],
+          cell.columnSpan,
+          1,
+        );
+      }
+      anchors.push({ row: r, column: anchorIndex });
+    }
+
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    const first = anchors[0];
+    if (first) placeCaretInCell(accessor, docDataModel, range.tableId, first.row, first.column);
+    return true;
   },
 };
 
@@ -859,6 +939,56 @@ function findCellRange(
 
   const cell = tableNode.children[row]?.children[column];
   return cell ? { startIndex: cell.startIndex, endIndex: cell.endIndex } : null;
+}
+
+/**
+ * Where a table cell begins in the document's character stream, read from
+ * the model's own table tokens rather than the skeleton - the skeleton's
+ * table node is not addressable straight after a structural mutation.
+ */
+function findCellStartOffset(
+  docDataModel: DocumentDataModel,
+  tableId: string,
+  row: number,
+  column: number,
+): number | null {
+  const body = docDataModel.getBody();
+  const table = body?.tables?.find((t) => t.tableId === tableId);
+  if (!body || !table) return null;
+
+  const { dataStream } = body;
+  let rowIndex = -1;
+  let columnIndex = -1;
+  for (let i = table.startIndex; i < table.endIndex; i++) {
+    const char = dataStream[i];
+    if (char === TABLE_ROW_START_TOKEN) {
+      rowIndex++;
+      columnIndex = -1;
+    } else if (char === TABLE_CELL_START_TOKEN) {
+      columnIndex++;
+      if (rowIndex === row && columnIndex === column) return i + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Leaves the caret inside a cell after a structural change, the way Word
+ * does: merging two cells drops the cursor into the merged one instead of
+ * clearing the selection (which would also drop the Table Design tab).
+ */
+function placeCaretInCell(
+  accessor: IAccessor,
+  docDataModel: DocumentDataModel,
+  tableId: string,
+  row: number,
+  column: number,
+) {
+  const offset = findCellStartOffset(docDataModel, tableId, row, column);
+  if (offset == null) return;
+  accessor
+    .get(DocSelectionManagerService)
+    .replaceDocRanges([{ startOffset: offset, endOffset: offset }]);
 }
 
 export interface ISetTableCellAlignParams {
@@ -987,4 +1117,5 @@ export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
   SetTableBandedRowsCommand,
   SetTableHeaderRowCommand,
   MergeTableCellsCommand,
+  SplitTableCellsCommand,
 ];

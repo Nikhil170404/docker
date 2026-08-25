@@ -12,7 +12,7 @@ import { UniverDocsThreadCommentPreset } from "@univerjs/preset-docs-thread-comm
 import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comment/locales/en-US";
 import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
 import { DocumentFlavor, ICommandService, UniverInstanceType, validateDocumentStructure } from "@univerjs/core";
-import type { DocumentDataModel, IDocumentData, Injector } from "@univerjs/core";
+import type { DocumentDataModel, IDocumentData, Injector, Nullable } from "@univerjs/core";
 import { IUniverInstanceService } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, SetTextSelectionsOperation } from "@univerjs/docs";
 import { IRenderManagerService } from "@univerjs/engine-render";
@@ -21,8 +21,16 @@ import {
   clearRememberedTableRange,
   resolveLiveTableRange,
 } from "@/lib/univer/table-style-commands";
+import { SetBorderPenCommand } from "@/lib/univer/border-pen";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
-import { createWordCommands, SetZoomCommandId } from "@/lib/univer/word-commands";
+import {
+  createWordCommands,
+  SetIndentCommandId,
+  SetPageMarginsCommandId,
+  SetZoomCommandId,
+} from "@/lib/univer/word-commands";
+import WordRuler, { type RulerGeometry } from "./WordRuler";
+import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
 import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
@@ -61,6 +69,10 @@ export type WordDocumentStatus = {
 export type DocsEditorHandle = {
   setName: (name: string) => void;
   setZoom: (zoom: number) => void;
+  /** Live page geometry for the ruler, or null before the doc renders. */
+  getRulerGeometry: () => RulerGeometry | null;
+  setIndents: (indents: { indentStart?: number; indentEnd?: number; indentFirstLine?: number }) => void;
+  setMargins: (margins: { marginLeft?: number; marginRight?: number }) => void;
 };
 
 export default function DocsEditor({
@@ -73,6 +85,7 @@ export default function DocsEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
   const commandServiceRef = useRef<ICommandService | null>(null);
+  const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
   const documentNameRef = useRef<(name: string) => void>(() => {});
   const statusListenerRef = useRef(onStatusChange);
   const [, setReady] = useState(false);
@@ -154,6 +167,7 @@ export default function DocsEditor({
     const injector = univer.__getInjector() as Injector;
     const commandService = injector.get(ICommandService);
     const registrations = [
+      SetBorderPenCommand,
       ...ALL_TABLE_STYLE_COMMANDS,
       ...createWordCommands({ doc: fDoc, getContainer: () => containerRef.current }),
     ].map((command) => commandService.registerCommand(command));
@@ -165,12 +179,68 @@ export default function DocsEditor({
     };
 
     const wordRibbon = installWordRibbon(injector);
+
+    // Word puts its ruler between the ribbon and the page. Univer renders a
+    // header slot in exactly that spot, so the ruler goes in as a UI part
+    // rather than a sibling element that would sit above the ribbon.
+    function DocumentRuler() {
+      return (
+        <WordRuler
+          getGeometry={() => rulerGeometryRef.current()}
+          handlers={{
+            onIndentChange: (indents) => void commandService.executeCommand(SetIndentCommandId, indents),
+            onMarginChange: (margins) => void commandService.executeCommand(SetPageMarginsCommandId, margins),
+          }}
+        />
+      );
+    }
+    const rulerPart = injector.get(IUIPartsService).registerComponent(BuiltInUIPart.HEADER, () => DocumentRuler);
+
+    // The ruler needs the page's on-screen position, which is the document
+    // component's own offset inside the scene, shifted by the horizontal
+    // scroll and multiplied by the zoom.
+    rulerGeometryRef.current = () => {
+      const container = containerRef.current;
+      const renderUnit = renderManagerService.getRenderUnitById(fDoc.getId());
+      const canvas = container?.querySelector("canvas");
+      if (!container || !renderUnit || !canvas) return null;
+
+      const documents = renderUnit.mainComponent as unknown as { left: number } | undefined;
+      const scene = renderUnit.scene;
+      const scale = scene.getAncestorScale().scaleX || 1;
+      const scrollX = scene.getViewport("viewMain")?.viewportScrollX ?? 0;
+      const canvasOffset = canvas.getBoundingClientRect().left - container.getBoundingClientRect().left;
+
+      const docModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC);
+      const style = docModel?.getDocumentStyle();
+      if (!documents || !style?.pageSize?.width) return null;
+
+      const paragraphStyle = currentParagraphStyle(docModel);
+      return {
+        pageLeft: canvasOffset + (documents.left - scrollX) * scale,
+        pageWidth: style.pageSize.width * scale,
+        marginLeft: style.marginLeft ?? 72,
+        marginRight: style.marginRight ?? 72,
+        indentStart: paragraphStyle?.indentStart?.v ?? 0,
+        indentEnd: paragraphStyle?.indentEnd?.v ?? 0,
+        indentFirstLine: paragraphStyle?.indentFirstLine?.v ?? 0,
+        scale,
+      };
+    };
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
 
     const renderManagerService = injector.get(IRenderManagerService);
     const docSelectionManagerService = injector.get(DocSelectionManagerService);
     const univerInstanceService = injector.get(IUniverInstanceService);
+
+    /** The paragraph the cursor is in, whose indents the ruler shows. */
+    const currentParagraphStyle = (docModel: Nullable<DocumentDataModel>) => {
+      const offset = docSelectionManagerService.getActiveTextRange()?.startOffset;
+      if (offset == null) return undefined;
+      const paragraphs = docModel?.getBody()?.paragraphs ?? [];
+      return paragraphs.find((paragraph) => paragraph.startIndex >= offset)?.paragraphStyle;
+    };
 
     // Word's status bar: which page the cursor is on, how many pages there
     // are, the word count and the zoom level.
@@ -213,15 +283,33 @@ export default function DocsEditor({
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
     const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.save());
     // Word shows its Table Design tab whenever the cursor is inside a
-    // table. `textSelection$` alone misses pointer-driven moves — clicking
-    // from a cell into body text does not emit — so the selection operation
-    // Univer's own toolbar items listen to drives this too.
+    // table. The caret's offset against the document's own table ranges is
+    // the reliable test: the selection's node path is empty right after a
+    // table mutation (a merge, say), and `textSelection$` alone misses
+    // pointer-driven moves, so the selection operation Univer's own toolbar
+    // items listen to drives this too.
+    const isCursorInsideTable = (): boolean | null => {
+      if (resolveLiveTableRange(docSelectionManagerService)) return true;
+      const offset = docSelectionManagerService.getActiveTextRange()?.startOffset;
+      // No selection at all says nothing about where the user is (a table
+      // mutation clears it), so the tab keeps whatever state it had.
+      if (offset == null) return null;
+      const tables = univerInstanceService
+        .getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC)
+        ?.getBody()?.tables;
+      return Boolean(tables?.some((table) => offset > table.startIndex && offset < table.endIndex));
+    };
     const refreshTableContext = () => {
-      wordRibbon.setTableContextActive(Boolean(resolveLiveTableRange(docSelectionManagerService)));
+      const inside = isCursorInsideTable();
+      if (inside !== null) wordRibbon.setTableContextActive(inside);
     };
 
     const commandSubscription = commandService.onCommandExecuted((command) => {
-      if (command.id === SetTextSelectionsOperation.id) refreshTableContext();
+      // Using a table tool keeps the tab up even though the mutation clears
+      // the cell selection it was applied to; the next selection change
+      // decides again, exactly as in Word.
+      if (command.id.startsWith("dockaro.command.table-")) wordRibbon.setTableContextActive(true);
+      else if (command.id === SetTextSelectionsOperation.id) refreshTableContext();
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(flushSave, AUTOSAVE_DELAY_MS);
       scheduleStatusRefresh();
@@ -244,6 +332,7 @@ export default function DocsEditor({
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
       wordRibbon.dispose();
+      rulerPart.dispose();
       tableResize.dispose();
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
@@ -290,6 +379,7 @@ export default function DocsEditor({
       disposedRef.current = false;
       commandServiceRef.current = null;
       documentNameRef.current = () => {};
+      rulerGeometryRef.current = () => null;
       setReady(false);
     };
   }, []);
@@ -298,6 +388,13 @@ export default function DocsEditor({
     setName: (name: string) => documentNameRef.current(name),
     setZoom: (zoom: number) => {
       void commandServiceRef.current?.executeCommand(SetZoomCommandId, { value: zoom });
+    },
+    getRulerGeometry: () => rulerGeometryRef.current(),
+    setIndents: (indents) => {
+      void commandServiceRef.current?.executeCommand(SetIndentCommandId, indents);
+    },
+    setMargins: (margins) => {
+      void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
     },
   }));
 
