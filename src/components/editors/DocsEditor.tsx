@@ -11,18 +11,42 @@ import UniverPresetDocsHyperLinkEnUS from "@univerjs/preset-docs-hyper-link/loca
 import { UniverDocsThreadCommentPreset } from "@univerjs/preset-docs-thread-comment";
 import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comment/locales/en-US";
 import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
-import { CommandType, DocumentFlavor, ICommandService, SectionType, validateDocumentStructure } from "@univerjs/core";
-import type { IDocumentData, Injector } from "@univerjs/core";
-import { DocSelectionManagerService, DocSkeletonManagerService } from "@univerjs/docs";
-import { DocSelectionRenderService } from "@univerjs/docs-ui";
-import { DocumentEditArea, IRenderManagerService } from "@univerjs/engine-render";
-import { ALL_TABLE_STYLE_COMMANDS, resolveLiveTableRange, type SelectedTableRange } from "@/lib/univer/table-style-commands";
+import { DocumentFlavor, ICommandService, UniverInstanceType, validateDocumentStructure } from "@univerjs/core";
+import type { DocumentDataModel, IDocumentData, Injector, Nullable } from "@univerjs/core";
+import { IUniverInstanceService } from "@univerjs/core";
+import { DocSelectionManagerService, DocSkeletonManagerService, SetTextSelectionsOperation } from "@univerjs/docs";
+import { IRenderManagerService } from "@univerjs/engine-render";
+import {
+  ALL_TABLE_STYLE_COMMANDS,
+  clearRememberedTableRange,
+  resolveLiveTableRange,
+} from "@/lib/univer/table-style-commands";
+import { SetBorderPenCommand } from "@/lib/univer/border-pen";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
-import { exportAsHtml, exportAsPdf, exportAsWord } from "@/lib/univer/doc-export";
-import TableRibbon from "./TableRibbon";
+import {
+  createWordCommands,
+  SetIndentCommandId,
+  SetPageMarginsCommandId,
+  SetZoomCommandId,
+} from "@/lib/univer/word-commands";
+import WordRuler, { type RulerGeometry } from "./WordRuler";
+import WordVerticalRuler from "./WordVerticalRuler";
+import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
+import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
+import { createTableResizeInteraction } from "@/lib/univer/table-resize";
+import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
+import { disableSlashMenu } from "@/lib/univer/slash-key";
+import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
+import { createWordFeatureCommands } from "@/lib/univer/word-features";
+import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-check";
+import { createTrackChanges, createTrackChangesCommands } from "@/lib/univer/track-changes";
+import { createWatermarkCommand } from "@/lib/univer/watermark";
+import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
 const AUTOSAVE_DELAY_MS = 600;
+const DEFAULT_DOCUMENT_NAME = "Untitled document";
+const STATUS_REFRESH_DELAY_MS = 400;
 // A4 at 96 DPI. Traditional flavor is what unlocks Word-compatible real
 // pagination (page breaks, ruler-visible page bounds) and header/footer
 // editing — both crash on creation-time documentStyle in Univer 0.25.x but
@@ -37,46 +61,80 @@ import "@univerjs/preset-docs-drawing/lib/index.css";
 import "@univerjs/preset-docs-hyper-link/lib/index.css";
 import "@univerjs/preset-docs-thread-comment/lib/index.css";
 
-export type ExportFormat = "word" | "pdf" | "html";
-
-export type DocsEditorHandle = {
-  openHeaderFooter: () => void;
-  setLineSpacing: (lineSpacing: number) => void;
-  exportDocument: (format: ExportFormat) => void;
-  insertPageBreak: () => void;
+/** What the Word-style title bar and status bar display. */
+export type WordDocumentStatus = {
+  name: string;
+  wordCount: number;
+  pageCount: number;
+  currentPage: number;
+  zoom: number;
 };
 
-export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEditorHandle | null> }) {
+/**
+ * What the surrounding Word chrome can do to the document. Everything else
+ * — formatting, layout, export — is a ribbon command inside Univer.
+ */
+export type DocsEditorHandle = {
+  setName: (name: string) => void;
+  setZoom: (zoom: number) => void;
+  /** Live page geometry for the ruler, or null before the doc renders. */
+  getRulerGeometry: () => RulerGeometry | null;
+  setIndents: (indents: { indentStart?: number; indentEnd?: number; indentFirstLine?: number }) => void;
+  setMargins: (margins: { marginLeft?: number; marginRight?: number }) => void;
+};
+
+export default function DocsEditor({
+  apiRef,
+  onStatusChange,
+}: {
+  apiRef?: React.RefObject<DocsEditorHandle | null>;
+  onStatusChange?: (status: WordDocumentStatus) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
   const commandServiceRef = useRef<ICommandService | null>(null);
-  const enterHeaderEditModeRef = useRef<() => void>(() => {});
-  const exportDocumentRef = useRef<(format: ExportFormat) => void>(() => {});
-  const insertPageBreakRef = useRef<() => void>(() => {});
-  // Typing into the ribbon (a border width, a row height) steals focus from
-  // the canvas, which clears Univer's live rect-range selection before the
-  // "Apply" click can read it. This tracks the last real table-cell
-  // selection independently so it survives that focus loss.
-  const lastTableRangeRef = useRef<SelectedTableRange | null>(null);
+  const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
+  const documentNameRef = useRef<(name: string) => void>(() => {});
+  const statusListenerRef = useRef(onStatusChange);
   const [ready, setReady] = useState(false);
-  const [tableActive, setTableActive] = useState(false);
+
+  // The editor is created once; the callback identity may change on every
+  // parent render, so it is read through a ref rather than re-running setup.
+  useEffect(() => {
+    statusListenerRef.current = onStatusChange;
+  }, [onStatusChange]);
 
   useEffect(() => {
     if (!containerRef.current || disposedRef.current) return;
     disposedRef.current = true;
 
+    // Word types "/" as a character; Univer's block menu steals the key.
+    disableSlashMenu();
+
     const { univer, univerAPI } = createUniver({
+      theme: WORD_THEME,
       locale: LocaleType.EN_US,
       locales: {
-        [LocaleType.EN_US]: mergeLocales(
-          UniverPresetDocsCoreEnUS,
-          UniverPresetDocsDrawingEnUS,
-          UniverPresetDocsHyperLinkEnUS,
-          UniverPresetDocsThreadCommentEnUS,
+        [LocaleType.EN_US]: buildWordLocale(
+          mergeLocales(
+            UniverPresetDocsCoreEnUS,
+            UniverPresetDocsDrawingEnUS,
+            UniverPresetDocsHyperLinkEnUS,
+            UniverPresetDocsThreadCommentEnUS,
+          ),
+          WORD_UI_LOCALE,
         ),
       },
       presets: [
-        UniverDocsCorePreset({ container: containerRef.current }),
+        UniverDocsCorePreset({
+          container: containerRef.current,
+          // Word's ribbon: a tab strip over grouped, two-row controls.
+          ribbonType: "grid",
+          // Univer's own footer is replaced by a Word status bar that also
+          // reports the page count.
+          footer: false,
+          menu: RELOCATED_UNIVER_MENU_ITEMS,
+        }),
         UniverDocsDrawingPreset(),
         UniverDocsHyperLinkPreset(),
         UniverDocsThreadCommentPreset(),
@@ -112,135 +170,137 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     const initialData: Partial<IDocumentData> = saved
       ? { ...saved, documentStyle: { ...DEFAULT_DOCUMENT_STYLE, ...saved.documentStyle } }
       : { documentStyle: DEFAULT_DOCUMENT_STYLE };
+    // Word names a new document rather than leaving it blank, and this name
+    // is what the title bar shows and what the export is filed under.
+    if (!initialData.title) initialData.title = DEFAULT_DOCUMENT_NAME;
     const fDoc = univerAPI.createDocument(initialData);
 
     const injector = univer.__getInjector() as Injector;
     const commandService = injector.get(ICommandService);
-    ALL_TABLE_STYLE_COMMANDS.forEach((cmd) => commandService.registerCommand(cmd));
+    const spellChecker = createSpellChecker(injector, fDoc, () => containerRef.current);
+    const trackChanges = createTrackChanges(injector, fDoc);
+    const registrations = [
+      SetBorderPenCommand,
+      ...ALL_TABLE_STYLE_COMMANDS,
+      ...createWordCommands({ doc: fDoc, getContainer: () => containerRef.current }),
+      ...createWordFeatureCommands(fDoc),
+      createSpellCheckCommand(spellChecker),
+      ...createTrackChangesCommands(trackChanges),
+      createWatermarkCommand(fDoc),
+    ].map((command) => commandService.registerCommand(command));
     commandServiceRef.current = commandService;
+    documentNameRef.current = (name: string) => {
+      fDoc.setName(name);
+      saveSnapshot(STORAGE_KEY, fDoc.save());
+      void refreshStatus();
+    };
 
-    // Univer's own right-click "Section Settings" > section-break submenu
-    // (Continuous / Next page / Next column / Even page / Odd page) invokes
-    // commandService.executeCommand() with these exact menu ids directly —
-    // confirmed from the crash it throws otherwise: `[CommandService]:
-    // command "doc.menu.section-break.continuous" is not registered.` The
-    // menu is real UI shipped by docs-ui; only the command handlers behind
-    // it are missing in this version. Wire them to the public
-    // insertSectionBreak facade method (same offset + forceRelayout
-    // pattern as every other command here) so this native menu actually
-    // works instead of crashing.
-    const sectionBreakCommands: { id: string; nextSectionType: SectionType }[] = [
-      { id: "doc.menu.section-break.continuous", nextSectionType: SectionType.CONTINUOUS },
-      { id: "doc.menu.section-break.next-page", nextSectionType: SectionType.NEXT_PAGE },
-      { id: "doc.menu.section-break.next-column", nextSectionType: SectionType.NEXT_COLUMN },
-      { id: "doc.menu.section-break.even-page", nextSectionType: SectionType.EVEN_PAGE },
-      { id: "doc.menu.section-break.odd-page", nextSectionType: SectionType.ODD_PAGE },
-    ];
-    sectionBreakCommands.forEach(({ id, nextSectionType }) => {
-      commandService.registerCommand({
-        id,
-        type: CommandType.COMMAND,
-        handler: () => {
-          const offset = injector.get(DocSelectionManagerService).getActiveTextRange()?.startOffset;
-          if (offset == null) return false;
-          const section = fDoc.insertSectionBreak(offset, { nextSectionType });
-          if (!section) return false;
+    const wordRibbon = installWordRibbon(injector);
 
-          const render = injector.get(IRenderManagerService).getRenderUnitById(fDoc.getId());
-          const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
-          skeleton?.makeDirty(true);
-          skeleton?.calculate();
-          render?.scene.makeDirty(true);
-          render?.mainComponent?.makeDirty(true);
-          void render?.scene.requestRender();
-          return true;
-        },
+    // Word puts its ruler between the ribbon and the page. Univer renders a
+    // header slot in exactly that spot, so the ruler goes in as a UI part
+    // rather than a sibling element that would sit above the ribbon.
+    function DocumentRuler() {
+      return (
+        <WordRuler
+          getGeometry={() => rulerGeometryRef.current()}
+          handlers={{
+            onIndentChange: (indents) => void commandService.executeCommand(SetIndentCommandId, indents),
+            onMarginChange: (margins) => void commandService.executeCommand(SetPageMarginsCommandId, margins),
+          }}
+        />
+      );
+    }
+    const rulerPart = injector.get(IUIPartsService).registerComponent(BuiltInUIPart.HEADER, () => DocumentRuler);
+
+    // The ruler needs the page's on-screen position, which is the document
+    // component's own offset inside the scene, shifted by the horizontal
+    // scroll and multiplied by the zoom.
+    rulerGeometryRef.current = () => {
+      const container = containerRef.current;
+      const renderUnit = renderManagerService.getRenderUnitById(fDoc.getId());
+      const canvas = container?.querySelector("canvas");
+      if (!container || !renderUnit || !canvas) return null;
+
+      const documents = renderUnit.mainComponent as unknown as { left: number; top: number } | undefined;
+      const scene = renderUnit.scene;
+      const scale = scene.getAncestorScale().scaleX || 1;
+      const scrollX = scene.getViewport("viewMain")?.viewportScrollX ?? 0;
+      const canvasOffset = canvas.getBoundingClientRect().left - container.getBoundingClientRect().left;
+
+      const docModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC);
+      const style = docModel?.getDocumentStyle();
+      if (!documents || !style?.pageSize?.width) return null;
+
+      const paragraphStyle = currentParagraphStyle(docModel);
+      const canvasRect = canvas.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const scrollY = scene.getViewport("viewMain")?.viewportScrollY ?? 0;
+      return {
+        pageLeft: canvasOffset + (documents.left - scrollX) * scale,
+        pageTop: canvasRect.top - containerRect.top + (documents.top - scrollY) * scale,
+        pageWidth: style.pageSize.width * scale,
+        pageHeight: (style.pageSize.height ?? 1123) * scale,
+        marginLeft: style.marginLeft ?? 72,
+        marginRight: style.marginRight ?? 72,
+        marginTop: style.marginTop ?? 72,
+        marginBottom: style.marginBottom ?? 72,
+        indentStart: paragraphStyle?.indentStart?.v ?? 0,
+        indentEnd: paragraphStyle?.indentEnd?.v ?? 0,
+        indentFirstLine: paragraphStyle?.indentFirstLine?.v ?? 0,
+        scale,
+      };
+    };
+    // Word's table borders are draggable; Univer's have no such interaction.
+    const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
+    const pageChrome = hidePageMarginMarks(injector, fDoc.getId());
+    const dialogFocus = restoreFocusAfterDialogs(injector, fDoc.getId());
+
+    const renderManagerService = injector.get(IRenderManagerService);
+    const docSelectionManagerService = injector.get(DocSelectionManagerService);
+    const univerInstanceService = injector.get(IUniverInstanceService);
+
+    /** The paragraph the cursor is in, whose indents the ruler shows. */
+    const currentParagraphStyle = (docModel: Nullable<DocumentDataModel>) => {
+      const offset = docSelectionManagerService.getActiveTextRange()?.startOffset;
+      if (offset == null) return undefined;
+      const paragraphs = docModel?.getBody()?.paragraphs ?? [];
+      return paragraphs.find((paragraph) => paragraph.startIndex >= offset)?.paragraphStyle;
+    };
+
+    // Word's status bar: which page the cursor is on, how many pages there
+    // are, the word count and the zoom level.
+    let statusTimeout: ReturnType<typeof setTimeout> | undefined;
+    const refreshStatus = async () => {
+      const listener = statusListenerRef.current;
+      if (!listener) return;
+      const docModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC);
+      if (!docModel) return;
+
+      const skeleton = renderManagerService.getRenderUnitById(fDoc.getId())?.with(DocSkeletonManagerService)?.getSkeleton();
+      const pages = skeleton?.getSkeletonData()?.pages ?? [];
+      const cursor = docSelectionManagerService.getActiveTextRange()?.startOffset ?? 0;
+      const currentIndex = pages.findIndex((page) => cursor >= page.st && cursor <= page.ed);
+
+      let wordCount = 0;
+      try {
+        wordCount = (await docModel.getStatistics()).words;
+      } catch {
+        // Statistics are best-effort: an aborted run (fast typing) must not
+        // blank out the rest of the status bar.
+      }
+
+      listener({
+        name: fDoc.getName(),
+        wordCount,
+        pageCount: Math.max(pages.length, 1),
+        currentPage: currentIndex >= 0 ? currentIndex + 1 : 1,
+        zoom: Math.round((docModel.zoomRatio || 1) * 100),
       });
-    });
-
-    // Univer's own "Header & footer" side panel (doc.command.open-header-
-    // footer-panel) only ever shows real options when the document's edit
-    // focus is ALREADY inside a header/footer — otherwise it just renders
-    // "Header & footer settings are disabled" (confirmed by reading
-    // DocHeaderFooterPanel's source: it checks
-    // viewModel.getEditArea() !== DocumentEditArea.BODY). It's a contextual
-    // settings panel, not an entry point — Univer's own way in is double-
-    // clicking the page's top margin. This replicates that entry
-    // programmatically so our toolbar button is actually useful in one
-    // click: ensure a header segment exists (public facade API), then
-    // move the same edit-area/segment state double-click sets.
-    enterHeaderEditModeRef.current = () => {
-      const unitId = fDoc.getId();
-      const headerSegmentId = fDoc.ensurePageHeader(0);
-      const render = injector.get(IRenderManagerService).getRenderUnitById(unitId);
-      if (!render) return;
-
-      render.with(DocSkeletonManagerService).getViewModel().setEditArea(DocumentEditArea.HEADER);
-      const selectionRenderService = render.with(DocSelectionRenderService);
-      selectionRenderService.setSegment(headerSegmentId);
-      selectionRenderService.setSegmentPage(0);
-
-      const skeleton = render.with(DocSkeletonManagerService).getSkeleton();
-      skeleton?.makeDirty(true);
-      skeleton?.calculate();
-      render.scene.makeDirty(true);
-      render.mainComponent?.makeDirty(true);
-      void render.scene.requestRender();
     };
-
-    exportDocumentRef.current = (format) => {
-      const snapshot = fDoc.save();
-      if (format === "word") exportAsWord(snapshot);
-      else if (format === "pdf") exportAsPdf(snapshot);
-      else exportAsHtml(snapshot);
-    };
-
-    // Word's "Insert > Page Break" (Ctrl+Enter) equivalent. Univer has no
-    // dedicated page-break command, but FDocument.insertColumnBreak's own
-    // docs say it plainly: "In a single-column section, the traditional
-    // renderer advances to the next physical page" — exactly this, since
-    // every document here is single-column TRADITIONAL flavor.
-    insertPageBreakRef.current = () => {
-      const offset = injector.get(DocSelectionManagerService).getActiveTextRange()?.startOffset;
-      if (offset == null) return;
-      fDoc.insertColumnBreak(offset);
-
-      // insertColumnBreak() only updates the data model — without a forced
-      // relayout the canvas keeps hit-testing clicks against the
-      // pre-break skeleton, so a click placed right after using this
-      // button lands at the wrong offset (confirmed: typed text landed at
-      // document start instead of the click point). Same forceRelayout
-      // pattern as every table-style command in table-style-commands.ts.
-      const render = injector.get(IRenderManagerService).getRenderUnitById(fDoc.getId());
-      const skeleton = render?.with(DocSkeletonManagerService)?.getSkeleton();
-      skeleton?.makeDirty(true);
-      skeleton?.calculate();
-      render?.scene.makeDirty(true);
-      render?.mainComponent?.makeDirty(true);
-      void render?.scene.requestRender();
-
-      // Without this, the cursor's data-model position never actually
-      // moves past the break, so nothing tells the viewport to scroll —
-      // the new page exists but sits off-screen below the fold with no
-      // indication anything happened unless the user manually scrolls
-      // down (confirmed: this is exactly what made repeated clicks look
-      // like "nothing happens" in testing). Moving the selection here
-      // matches what normal typing does automatically when the cursor
-      // reaches the bottom of the visible viewport.
-      fDoc.setSelection(offset + 1, offset + 1);
-
-      // setSelection only moves Univer's internal model of where the
-      // cursor is — actual DOM focus stays on this <button> after a
-      // click, same as any HTML button. Confirmed by reproducing exactly
-      // what a user hitting this button then typing would see: every
-      // space bar press re-activates the button (native behavior for a
-      // focused <button>) instead of typing a space, so "New Page" typed
-      // right after clicking produced 5 more page breaks, not text.
-      // Univer's own editable surface is a contenteditable div inside our
-      // container — move real focus there so typing lands in the
-      // document again, matching what a click into the canvas does.
-      const editable = containerRef.current?.querySelector<HTMLElement>('[contenteditable="true"]');
-      editable?.focus();
+    const scheduleStatusRefresh = () => {
+      clearTimeout(statusTimeout);
+      statusTimeout = setTimeout(() => void refreshStatus(), STATUS_REFRESH_DELAY_MS);
     };
 
     // Autosave: debounce so a fast typist doesn't hit localStorage on every
@@ -248,36 +308,68 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
     const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.save());
-    const commandSubscription = commandService.onCommandExecuted(() => {
+    // Word shows its Table Design tab whenever the cursor is inside a
+    // table. The caret's offset against the document's own table ranges is
+    // the reliable test: the selection's node path is empty right after a
+    // table mutation (a merge, say), and `textSelection$` alone misses
+    // pointer-driven moves, so the selection operation Univer's own toolbar
+    // items listen to drives this too.
+    const isCursorInsideTable = (): boolean | null => {
+      const docDataModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
+        UniverInstanceType.UNIVER_DOC,
+      );
+      if (resolveLiveTableRange(docSelectionManagerService, docDataModel)) return true;
+      const offset = docSelectionManagerService.getActiveTextRange()?.startOffset;
+      // No selection at all says nothing about where the user is (a table
+      // mutation clears it), so the tab keeps whatever state it had.
+      if (offset == null) return null;
+      const tables = docDataModel?.getBody()?.tables;
+      return Boolean(tables?.some((table) => offset > table.startIndex && offset < table.endIndex));
+    };
+    const refreshTableContext = () => {
+      const inside = isCursorInsideTable();
+      if (inside !== null) wordRibbon.setTableContextActive(inside);
+    };
+
+    const commandSubscription = commandService.onCommandExecuted((command) => {
+      // Using a table tool keeps the tab up even though the mutation clears
+      // the cell selection it was applied to; the next selection change
+      // decides again, exactly as in Word.
+      if (command.id.startsWith("dockaro.command.table-")) wordRibbon.setTableContextActive(true);
+      else if (command.id === SetTextSelectionsOperation.id) refreshTableContext();
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(flushSave, AUTOSAVE_DELAY_MS);
+      scheduleStatusRefresh();
     });
     window.addEventListener("beforeunload", flushSave);
 
-    const docSelectionManagerService = injector.get(DocSelectionManagerService);
     const subscription = docSelectionManagerService.textSelection$.subscribe(() => {
-      const range = resolveLiveTableRange(docSelectionManagerService);
-
-      // Reflect the CURRENT selection exactly, like Word's Table Tools tab —
-      // show only while the selection is actually a table range, hide the
-      // instant it isn't. (Previously this only ever turned on and never
-      // back off, so one table click left the ribbon stuck on forever,
-      // including through an unrelated Select All.)
-      setTableActive(Boolean(range));
-
-      if (range) {
-        lastTableRangeRef.current = range;
-      }
+      // Reflect the CURRENT selection exactly, like Word's Table Design tab:
+      // show it only while the selection is actually inside a table, and
+      // drop it the instant it isn't.
+      refreshTableContext();
+      scheduleStatusRefresh();
     });
 
     setReady(true);
+    void refreshStatus();
 
     return () => {
       subscription.unsubscribe();
       commandSubscription.dispose();
+      registrations.forEach((registration) => registration.dispose());
+      wordRibbon.dispose();
+      rulerPart.dispose();
+      tableResize.dispose();
+      pageChrome.dispose();
+      dialogFocus.dispose();
+      spellChecker.dispose();
+      trackChanges.dispose();
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
+      clearTimeout(statusTimeout);
       flushSave();
+      clearRememberedTableRange();
 
       // univer.dispose() torn down while Univer's async preset init hasn't
       // yet reached its "steady" lifecycle stage (unmounting/navigating away
@@ -317,38 +409,36 @@ export default function DocsEditor({ apiRef }: { apiRef?: React.RefObject<DocsEd
 
       disposedRef.current = false;
       commandServiceRef.current = null;
-      enterHeaderEditModeRef.current = () => {};
-      exportDocumentRef.current = () => {};
-      insertPageBreakRef.current = () => {};
-      lastTableRangeRef.current = null;
+      documentNameRef.current = () => {};
+      rulerGeometryRef.current = () => null;
       setReady(false);
-      setTableActive(false);
     };
   }, []);
 
-  const runCommand = (id: string, params?: Record<string, unknown>) => {
-    commandServiceRef.current?.executeCommand(id, {
-      ...params,
-      range: lastTableRangeRef.current,
-    });
-  };
-
   useImperativeHandle(apiRef, () => ({
-    openHeaderFooter: () => enterHeaderEditModeRef.current(),
-    setLineSpacing: (lineSpacing: number) =>
-      // spacingRule: 0 = SpacingRule.AUTO. Without it, the renderer treats
-      // lineSpacing as an absolute size (clamped to the normal line height,
-      // so it's invisible) instead of a multiplier — found by reading the
-      // renderer's __getLineHeight source, not documented anywhere.
-      runCommand("doc-paragraph-setting.command", { paragraph: { lineSpacing, spacingRule: 0 } }),
-    exportDocument: (format: ExportFormat) => exportDocumentRef.current(format),
-    insertPageBreak: () => insertPageBreakRef.current(),
+    setName: (name: string) => documentNameRef.current(name),
+    setZoom: (zoom: number) => {
+      void commandServiceRef.current?.executeCommand(SetZoomCommandId, { value: zoom });
+    },
+    getRulerGeometry: () => rulerGeometryRef.current(),
+    setIndents: (indents) => {
+      void commandServiceRef.current?.executeCommand(SetIndentCommandId, indents);
+    },
+    setMargins: (margins) => {
+      void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
+    },
   }));
 
   return (
-    <div className="flex h-full w-full flex-col">
-      {ready && <TableRibbon run={runCommand} active={tableActive} />}
-      <div ref={containerRef} className="h-full min-h-0 w-full flex-1" />
+    <div ref={containerRef} className="relative h-full min-h-0 w-full flex-1">
+      {ready && (
+        <WordVerticalRuler
+          getGeometry={() => rulerGeometryRef.current()}
+          onMarginChange={(margins) => {
+            void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
+          }}
+        />
+      )}
     </div>
   );
 }

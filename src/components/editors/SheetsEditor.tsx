@@ -17,6 +17,7 @@ import UniverPresetSheetsSortEnUS from "@univerjs/preset-sheets-sort/locales/en-
 import { ICommandService } from "@univerjs/core";
 import type { Injector, IWorkbookData } from "@univerjs/core";
 import { loadSnapshot, saveSnapshot } from "@/lib/univer/persistence";
+import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 import "@univerjs/preset-sheets-core/lib/index.css";
 import "@univerjs/preset-sheets-find-replace/lib/index.css";
@@ -24,6 +25,17 @@ import "@univerjs/preset-sheets-conditional-formatting/lib/index.css";
 import "@univerjs/preset-sheets-data-validation/lib/index.css";
 import "@univerjs/preset-sheets-filter/lib/index.css";
 import "@univerjs/preset-sheets-sort/lib/index.css";
+
+// Office names the first ribbon tab "Home"; the rest of Univer's sheet tabs
+// (Insert / Formulas / Data / View) already match Excel's.
+const SHEETS_UI_LOCALE = {
+  ui: {
+    ribbon: {
+      start: "Home",
+      startDesc: "Fonts, number formats and cell styles.",
+    },
+  },
+};
 
 const STORAGE_KEY = "sheets-default";
 const AUTOSAVE_DELAY_MS = 600;
@@ -37,19 +49,28 @@ export default function SheetsEditor() {
     disposedRef.current = true;
 
     const { univer, univerAPI } = createUniver({
+      // Same Office chrome as the docs editor: Word blue, and the tabbed
+      // grid ribbon rather than the single toolbar row.
+      theme: WORD_THEME,
       locale: LocaleType.EN_US,
       locales: {
-        [LocaleType.EN_US]: mergeLocales(
-          UniverPresetSheetsCoreEnUS,
-          UniverPresetSheetsFindReplaceEnUS,
-          UniverPresetSheetsConditionalFormattingEnUS,
-          UniverPresetSheetsDataValidationEnUS,
-          UniverPresetSheetsFilterEnUS,
-          UniverPresetSheetsSortEnUS,
+        [LocaleType.EN_US]: buildWordLocale(
+          mergeLocales(
+            UniverPresetSheetsCoreEnUS,
+            UniverPresetSheetsFindReplaceEnUS,
+            UniverPresetSheetsConditionalFormattingEnUS,
+            UniverPresetSheetsDataValidationEnUS,
+            UniverPresetSheetsFilterEnUS,
+            UniverPresetSheetsSortEnUS,
+          ),
+          SHEETS_UI_LOCALE,
         ),
       },
       presets: [
-        UniverSheetsCorePreset({ container: containerRef.current }),
+        UniverSheetsCorePreset({
+          container: containerRef.current,
+          ribbonType: "grid",
+        }),
         UniverSheetsFindReplacePreset(),
         UniverSheetsConditionalFormattingPreset(),
         UniverSheetsDataValidationPreset(),

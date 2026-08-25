@@ -8,6 +8,17 @@
   --border: #262626;
   --muted: #a1a1aa;
   --surface: #131316;
+
+  /* Word chrome. The editor is a light Word window even though the
+   * marketing site around it is dark — matching Word beats matching the
+   * landing page, and it is the only way the app's own bars and Univer's
+   * (light) ribbon can read as one surface. */
+  --word-chrome: #f3f2f1;
+  --word-border: #e1dfdd;
+  --word-text: #201f1e;
+  --word-muted: #605e5c;
+  --word-accent: #185abd;
+  --word-canvas: #e6e6e6;
 }
 
 @theme inline {
@@ -18,6 +29,12 @@
   --color-border: var(--border);
   --color-muted: var(--muted);
   --color-surface: var(--surface);
+  --color-word-chrome: var(--word-chrome);
+  --color-word-border: var(--word-border);
+  --color-word-text: var(--word-text);
+  --color-word-muted: var(--word-muted);
+  --color-word-accent: var(--word-accent);
+  --color-word-canvas: var(--word-canvas);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -74,4 +91,97 @@ body {
 
 .text-balance {
   text-wrap: balance;
+}
+
+/* ---------------------------------------------------------------------------
+ * Word chrome for Univer's ribbon
+ * ---------------------------------------------------------------------------
+ * Univer's `grid` ribbon already has Word's shape — a tab strip above
+ * grouped, two-row controls — so this only closes the visual gap: Word's
+ * flat toolbar surface, and the group captions ("Font", "Paragraph", ...)
+ * that Univer's grid ribbon has no slot for. The captions are driven by the
+ * toolbar's own aria-label, which Univer sets to the active tab's title, so
+ * each tab's groups are labelled in the order this app defines them in
+ * word-ribbon.ts.
+ */
+.word-editor [data-u-comp="ribbon-grid-menu"],
+.word-editor [data-u-comp="ribbon-grid-toolbar"] {
+  background-color: var(--word-chrome);
+}
+
+.word-editor [data-u-comp="ribbon-grid-menu"] button[role="tab"] {
+  font-size: 13px;
+  font-weight: 400;
+  padding-inline: 12px;
+}
+
+.word-editor [data-u-comp="ribbon-grid-menu"] button[role="tab"][aria-selected="true"] {
+  font-weight: 600;
+}
+
+/* Room for the group captions below each group. */
+.word-editor [data-u-comp="ribbon-grid-toolbar"] {
+  height: 104px;
+}
+
+.word-editor [data-u-comp="ribbon-grid-group"] {
+  padding-bottom: 16px;
+}
+
+.word-editor [data-u-comp="ribbon-grid-group"]::after {
+  content: attr(data-word-group);
+  position: absolute;
+  inset-inline: 0;
+  bottom: 2px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--word-muted);
+  pointer-events: none;
+}
+
+/* Word's own group names, per tab, in the order word-ribbon.ts builds them.
+ * Scoped per editor because Docs and Sheets share the tab name "Home" but
+ * not its groups. */
+.word-docs [aria-label="File"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "File"; }
+
+.word-docs [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Undo"; }
+.word-docs [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(2)::after { content: "Font"; }
+.word-docs [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(3)::after { content: "Paragraph"; }
+.word-docs [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(4)::after { content: "Editing"; }
+
+.word-docs [aria-label="Insert"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Insert"; }
+
+.word-docs [aria-label="Layout"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Page setup"; }
+.word-docs [aria-label="Layout"] > [data-u-comp="ribbon-grid-group"]:nth-child(2)::after { content: "Paragraph"; }
+
+.word-docs [aria-label="Review"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Comments"; }
+
+.word-docs [aria-label="View"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Zoom"; }
+
+.word-docs [aria-label="Table Design"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Table style"; }
+.word-docs [aria-label="Table Design"] > [data-u-comp="ribbon-grid-group"]:nth-child(2)::after { content: "Borders"; }
+.word-docs [aria-label="Table Design"] > [data-u-comp="ribbon-grid-group"]:nth-child(3)::after { content: "Cells"; }
+.word-docs [aria-label="Table Design"] > [data-u-comp="ribbon-grid-group"]:nth-child(4)::after { content: "Rows & columns"; }
+
+/* Excel's names for the same groups on the spreadsheet side. */
+.word-sheets [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(1)::after { content: "Undo"; }
+.word-sheets [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(2)::after { content: "Font"; }
+.word-sheets [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(3)::after { content: "Alignment"; }
+.word-sheets [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(4)::after { content: "Number"; }
+.word-sheets [aria-label="Home"] > [data-u-comp="ribbon-grid-group"]:nth-child(5)::after { content: "Editing"; }
+
+/* Word's page canvas: a grey desk with the pages floating on it. */
+.word-editor [data-u-comp="workbench-layout"] {
+  background-color: var(--word-canvas);
+}
+
+/* Univer's large ribbon buttons stack a 2rem icon above a wrapped label in
+ * a column flex box, and the icon is the first thing the browser shrinks
+ * when the two don't quite fit — it collapses to zero height and the button
+ * renders as a bare word (reproduced on stock Univer with "Header & Footer"
+ * and "Page Setup"). Icons are fixed-size by definition, so opt them out of
+ * flex shrinking. */
+.word-editor [data-u-comp="ribbon-grid-toolbar"] svg {
+  flex: none;
 }

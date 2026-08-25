@@ -1,6 +1,7 @@
 import type {
   DocumentDataModel,
   IAccessor,
+  Nullable,
   IColorStyle,
   ICommand,
   IMutationInfo,
@@ -10,6 +11,7 @@ import type { IRichTextEditingMutationParams } from "@univerjs/docs";
 import {
   BooleanNumber,
   CommandType,
+  DashStyleType,
   HorizontalAlign,
   ICommandService,
   IUniverInstanceService,
@@ -23,7 +25,7 @@ import {
   VerticalAlignmentType,
 } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, RichTextEditingMutation } from "@univerjs/docs";
-import { IRenderManagerService } from "@univerjs/engine-render";
+import { getTableIdAndSliceIndex, IRenderManagerService } from "@univerjs/engine-render";
 import { getCommandSkeleton } from "@univerjs/docs-ui";
 
 // These commands fill a real gap in Univer's open-source Docs table plugin:
@@ -36,6 +38,11 @@ import { getCommandSkeleton } from "@univerjs/docs-ui";
 // (removing table cells changes the document's text stream) and is intentionally
 // not included here — that's real-but-separate follow-up work.
 
+// Univer's dataStream table tokens, by character code so no control
+// characters end up pasted into the source.
+const TABLE_ROW_START_TOKEN = String.fromCharCode(0x1b);
+const TABLE_CELL_START_TOKEN = String.fromCharCode(0x1c);
+
 export type SelectedTableRange = {
   tableId: string;
   startRow: number;
@@ -46,22 +53,40 @@ export type SelectedTableRange = {
 
 // A caret merely positioned inside one cell (no drag-selected block) never
 // produces a rectRange — confirmed in 1.0.0-beta.2, where a plain click
-// into a cell yields getRectRanges() === []. Table identity for a plain
-// caret only shows up in getDocRanges()'s startNodePosition.path, shaped
-// like ["pages", 0, "skeTables", tableId, "rows", r, "cells", c, ...].
-function extractTableCellFromPath(
-  path: (string | number)[] | undefined,
+// into a cell yields getRectRanges() === []. Which cell it is has to come
+// from the document itself: the selection's skeleton path names a *slice*
+// of the table, not the table (a table that spills onto a second page is
+// laid out as several skeleton tables, `${tableId}#-#0`, `#-#1`, ... each
+// numbering its rows from zero again), so reading row and column off the
+// path silently addresses the wrong cell — or no cell at all, since the
+// slice id is not a key in `tableSource`.
+//
+// Counting the model's own row/cell tokens up to the caret has neither
+// problem: the tokens are the table, whole, however it happens to be
+// paginated.
+function findCellAtOffset(
+  docDataModel: DocumentDataModel,
+  offset: number,
 ): { tableId: string; row: number; column: number } | null {
-  if (!path) return null;
-  const tablesIdx = path.indexOf("skeTables");
-  if (tablesIdx === -1) return null;
-  const tableId = path[tablesIdx + 1];
-  const rowsIdx = path.indexOf("rows", tablesIdx);
-  const cellsIdx = path.indexOf("cells", tablesIdx);
-  const row = rowsIdx === -1 ? undefined : path[rowsIdx + 1];
-  const column = cellsIdx === -1 ? undefined : path[cellsIdx + 1];
-  if (typeof tableId !== "string" || typeof row !== "number" || typeof column !== "number") return null;
-  return { tableId, row, column };
+  const body = docDataModel.getBody();
+  const table = body?.tables?.find((t) => offset > t.startIndex && offset < t.endIndex);
+  if (!body || !table) return null;
+
+  const { dataStream } = body;
+  let row = -1;
+  let column = -1;
+  for (let i = table.startIndex; i < table.endIndex && i < offset; i++) {
+    const char = dataStream[i];
+    if (char === TABLE_ROW_START_TOKEN) {
+      row++;
+      column = -1;
+    } else if (char === TABLE_CELL_START_TOKEN) {
+      column++;
+    }
+  }
+  if (row < 0 || column < 0) return null;
+
+  return { tableId: table.tableId, row, column };
 }
 
 // The single source of truth for "what table cell(s) is the user's live
@@ -70,24 +95,51 @@ function extractTableCellFromPath(
 // Design ribbon's visibility.
 export function resolveLiveTableRange(
   docSelectionManagerService: DocSelectionManagerService,
+  docDataModel: Nullable<DocumentDataModel>,
 ): SelectedTableRange | null {
   const rectRanges = docSelectionManagerService.getRectRanges();
   const rectRange = rectRanges?.find((r) => r.tableId);
   if (rectRange) {
-    return {
-      tableId: rectRange.tableId,
+    // A rect range's rows and columns are already absolute, but its
+    // tableId is the slice's.
+    return remember({
+      tableId: getTableIdAndSliceIndex(rectRange.tableId).tableId,
       startRow: Math.min(rectRange.startRow, rectRange.endRow),
       endRow: Math.max(rectRange.startRow, rectRange.endRow),
       startColumn: Math.min(rectRange.startColumn, rectRange.endColumn),
       endColumn: Math.max(rectRange.startColumn, rectRange.endColumn),
-    };
+    });
   }
 
-  const docRanges = docSelectionManagerService.getDocRanges();
-  const cell = extractTableCellFromPath(docRanges?.[0]?.startNodePosition?.path);
+  const offset = docSelectionManagerService.getDocRanges()?.[0]?.startOffset;
+  const cell = docDataModel && offset != null ? findCellAtOffset(docDataModel, offset) : null;
   if (!cell) return null;
 
-  return { tableId: cell.tableId, startRow: cell.row, endRow: cell.row, startColumn: cell.column, endColumn: cell.column };
+  return remember({
+    tableId: cell.tableId,
+    startRow: cell.row,
+    endRow: cell.row,
+    startColumn: cell.column,
+    endColumn: cell.column,
+  });
+}
+
+// Opening a ribbon dropdown (a colour picker, a row-height menu) moves DOM
+// focus off the canvas, and Univer clears its live selection when that
+// happens — so by the time the click that applies the command lands, the
+// live lookup above can already return null. Remembering the last real
+// table selection keeps those commands working; the Table Design tab is
+// only on screen while a table selection exists in the first place.
+let rememberedRange: SelectedTableRange | null = null;
+
+function remember(range: SelectedTableRange): SelectedTableRange {
+  rememberedRange = range;
+  return range;
+}
+
+/** Called when an editor is torn down so no range leaks into the next one. */
+export function clearRememberedTableRange() {
+  rememberedRange = null;
 }
 
 // Focusing any input outside the canvas (typing a border width, a row
@@ -99,7 +151,10 @@ export function resolveLiveTableRange(
 function resolveTableRange(accessor: IAccessor, explicit?: SelectedTableRange | null): SelectedTableRange | null {
   if (explicit) return explicit;
   const docSelectionManagerService = accessor.get(DocSelectionManagerService);
-  return resolveLiveTableRange(docSelectionManagerService);
+  const docDataModel = accessor
+    .get(IUniverInstanceService)
+    .getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC);
+  return resolveLiveTableRange(docSelectionManagerService, docDataModel) ?? rememberedRange;
 }
 
 function getDocAndTable(accessor: IAccessor, tableId: string) {
@@ -258,6 +313,8 @@ export interface ISetTableCellBorderParams {
   sides: BorderSide[];
   color: string | null;
   width: number;
+  /** Word's "Line Style": solid, dotted or dashed. Solid when omitted. */
+  dashStyle?: DashStyleType;
   range?: SelectedTableRange | null;
 }
 
@@ -286,9 +343,18 @@ export const SetTableCellBorderCommand: ICommand<ISetTableCellBorderParams> = {
 
         for (const side of params.sides) {
           const key = `border${side}` as const;
+          // Word's "No border" has to leave a border behind: Univer's
+          // renderer falls back to a default grey line whenever a cell has
+          // no border property at all, and only skips drawing when the
+          // border it finds is zero-width or transparent. Deleting the
+          // property would put the default line back.
           const newVal = params.color
-            ? { color: { rgb: params.color }, width: { v: params.width } }
-            : undefined;
+            ? {
+                color: { rgb: params.color },
+                width: { v: params.width },
+                dashStyle: params.dashStyle ?? DashStyleType.SOLID,
+              }
+            : { color: { rgb: "transparent" }, width: { v: 0 }, dashStyle: DashStyleType.SOLID };
 
           setProperty(
             jsonX,
@@ -347,6 +413,64 @@ export const SetTableCellVAlignCommand: ICommand<ISetTableCellVAlignParams> = {
     }
 
     return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cell margins (Word's Table Layout > Cell Margins)
+// ---------------------------------------------------------------------------
+//
+// The padding inside every cell, set for the table as a whole - which is
+// how Word's own Table Options dialog scopes it. Univer's model already
+// carries it (ITable.cellMargin) and the renderer already reads it; there
+// was just no way to change it.
+
+export interface ISetTableCellMarginParams {
+  margin: { start: number; end: number; top: number; bottom: number };
+  range?: SelectedTableRange | null;
+}
+
+export const SetTableCellMarginCommandId = "dockaro.command.table-cell-margin";
+
+export const SetTableCellMarginCommand: ICommand<ISetTableCellMarginParams> = {
+  id: SetTableCellMarginCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const range = resolveTableRange(accessor, params.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const { start, end, top, bottom } = params.margin;
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    setProperty(jsonX, rawActions, ["tableSource", range.tableId, "cellMargin"], table.cellMargin, {
+      start: { v: start },
+      end: { v: end },
+      top: { v: top },
+      bottom: { v: bottom },
+    });
+
+    // Per-cell overrides would win over the table default, so Univer's own
+    // per-cell margins (written when a table is created) are cleared too.
+    table.tableRows.forEach((row, r) => {
+      row.tableCells.forEach((cell, c) => {
+        if (!cell.margin) return;
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "margin"],
+          cell.margin,
+          undefined,
+        );
+      });
+    });
+
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    forceRelayout(accessor, docDataModel.getUnitId());
+    return true;
   },
 };
 
@@ -436,6 +560,127 @@ export const SetTableColumnWidthCommand: ICommand<ISetTableColumnWidthParams> = 
         params.width,
       );
     }
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Drag-resizing a column border, the way Word does it
+// ---------------------------------------------------------------------------
+//
+// Dragging a border in Word moves that border: the column on its left takes
+// the delta and the column on its right gives it back, so the table keeps
+// its overall width. Dragging the table's own right edge widens the table
+// instead. Both are one command so a drag is a single undo step.
+
+/** Word refuses to shrink a column below roughly this width. */
+const MIN_COLUMN_WIDTH = 24;
+
+export interface IResizeTableColumnParams {
+  tableId: string;
+  /** Index of the column on the left of the dragged border. */
+  columnIndex: number;
+  /** Movement in document pixels; positive widens the left column. */
+  delta: number;
+}
+
+export const ResizeTableColumnCommandId = "dockaro.command.table-resize-column";
+
+export const ResizeTableColumnCommand: ICommand<IResizeTableColumnParams> = {
+  id: ResizeTableColumnCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params || !params.delta) return false;
+    const found = getDocAndTable(accessor, params.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const left = table.tableColumns[params.columnIndex];
+    if (!left) return false;
+    const right = table.tableColumns[params.columnIndex + 1];
+    const leftWidth = left.size?.width?.v ?? 0;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    const setColumnWidth = (index: number, from: number, to: number) => {
+      setProperty(
+        jsonX,
+        rawActions,
+        ["tableSource", params.tableId, "tableColumns", index, "size", "width", "v"],
+        from,
+        to,
+      );
+    };
+
+    if (right) {
+      const rightWidth = right.size?.width?.v ?? 0;
+      // Clamp the drag so neither side collapses; the border simply stops.
+      const delta = Math.max(
+        MIN_COLUMN_WIDTH - leftWidth,
+        Math.min(rightWidth - MIN_COLUMN_WIDTH, params.delta),
+      );
+      if (!delta) return false;
+      setColumnWidth(params.columnIndex, leftWidth, leftWidth + delta);
+      setColumnWidth(params.columnIndex + 1, rightWidth, rightWidth - delta);
+    } else {
+      const delta = Math.max(MIN_COLUMN_WIDTH - leftWidth, params.delta);
+      if (!delta) return false;
+      setColumnWidth(params.columnIndex, leftWidth, leftWidth + delta);
+      const tableWidth = table.size?.width?.v;
+      if (typeof tableWidth === "number") {
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", params.tableId, "size", "width", "v"],
+          tableWidth,
+          tableWidth + delta,
+        );
+      }
+    }
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Drag-resizing a row border
+// ---------------------------------------------------------------------------
+
+/** Word's minimum row height, in document pixels. */
+const MIN_ROW_HEIGHT = 16;
+
+export interface IResizeTableRowParams {
+  tableId: string;
+  rowIndex: number;
+  /** The row's new height in document pixels. */
+  height: number;
+}
+
+export const ResizeTableRowCommandId = "dockaro.command.table-resize-row";
+
+export const ResizeTableRowCommand: ICommand<IResizeTableRowParams> = {
+  id: ResizeTableRowCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const found = getDocAndTable(accessor, params.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+    const row = table.tableRows[params.rowIndex];
+    if (!row) return false;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    setProperty(
+      jsonX,
+      rawActions,
+      ["tableSource", params.tableId, "tableRows", params.rowIndex, "trHeight"],
+      row.trHeight,
+      // Dragging a row border in Word sets a minimum height, not a fixed
+      // one: the row still grows if its content needs more space.
+      { val: { v: Math.max(MIN_ROW_HEIGHT, params.height) }, hRule: TableRowHeightRule.AT_LEAST },
+    );
 
     return runMutation(accessor, docDataModel, rawActions);
   },
@@ -661,7 +906,75 @@ export const MergeTableCellsCommand: ICommand<IMergeTableCellsParams> = {
       );
     }
 
-    return runMutation(accessor, docDataModel, rawActions);
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    placeCaretInCell(accessor, docDataModel, range.tableId, range.startRow, range.startColumn);
+    return true;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Splitting a merged cell back apart (Word's "Split Cells")
+// ---------------------------------------------------------------------------
+//
+// The mirror image of the merge above: the anchor goes back to spanning one
+// column and every cell it absorbed (marked with a zero span) becomes a
+// normal cell again.
+
+export interface ISplitTableCellsParams {
+  range?: SelectedTableRange | null;
+}
+
+export const SplitTableCellsCommandId = "dockaro.command.table-split-cells";
+
+export const SplitTableCellsCommand: ICommand<ISplitTableCellsParams> = {
+  id: SplitTableCellsCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    const range = resolveTableRange(accessor, params?.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    const anchors: { row: number; column: number }[] = [];
+
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const row = table.tableRows[r];
+      if (!row) continue;
+      // Walk back to the anchor: the caret can sit anywhere in the merged run.
+      let anchorIndex = range.startColumn;
+      while (anchorIndex > 0 && row.tableCells[anchorIndex]?.columnSpan === 0) anchorIndex--;
+      const anchor = row.tableCells[anchorIndex];
+      const span = anchor?.columnSpan ?? 1;
+      if (!anchor || span <= 1) continue;
+
+      setProperty(
+        jsonX,
+        rawActions,
+        ["tableSource", range.tableId, "tableRows", r, "tableCells", anchorIndex, "columnSpan"],
+        anchor.columnSpan,
+        1,
+      );
+      for (let c = anchorIndex + 1; c < anchorIndex + span; c++) {
+        const cell = row.tableCells[c];
+        if (!cell) continue;
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "columnSpan"],
+          cell.columnSpan,
+          1,
+        );
+      }
+      anchors.push({ row: r, column: anchorIndex });
+    }
+
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    const first = anchors[0];
+    if (first) placeCaretInCell(accessor, docDataModel, range.tableId, first.row, first.column);
+    return true;
   },
 };
 
@@ -714,6 +1027,56 @@ function findCellRange(
 
   const cell = tableNode.children[row]?.children[column];
   return cell ? { startIndex: cell.startIndex, endIndex: cell.endIndex } : null;
+}
+
+/**
+ * Where a table cell begins in the document's character stream, read from
+ * the model's own table tokens rather than the skeleton - the skeleton's
+ * table node is not addressable straight after a structural mutation.
+ */
+function findCellStartOffset(
+  docDataModel: DocumentDataModel,
+  tableId: string,
+  row: number,
+  column: number,
+): number | null {
+  const body = docDataModel.getBody();
+  const table = body?.tables?.find((t) => t.tableId === tableId);
+  if (!body || !table) return null;
+
+  const { dataStream } = body;
+  let rowIndex = -1;
+  let columnIndex = -1;
+  for (let i = table.startIndex; i < table.endIndex; i++) {
+    const char = dataStream[i];
+    if (char === TABLE_ROW_START_TOKEN) {
+      rowIndex++;
+      columnIndex = -1;
+    } else if (char === TABLE_CELL_START_TOKEN) {
+      columnIndex++;
+      if (rowIndex === row && columnIndex === column) return i + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Leaves the caret inside a cell after a structural change, the way Word
+ * does: merging two cells drops the cursor into the merged one instead of
+ * clearing the selection (which would also drop the Table Design tab).
+ */
+function placeCaretInCell(
+  accessor: IAccessor,
+  docDataModel: DocumentDataModel,
+  tableId: string,
+  row: number,
+  column: number,
+) {
+  const offset = findCellStartOffset(docDataModel, tableId, row, column);
+  if (offset == null) return;
+  accessor
+    .get(DocSelectionManagerService)
+    .replaceDocRanges([{ startOffset: offset, endOffset: offset }]);
 }
 
 export interface ISetTableCellAlignParams {
@@ -829,6 +1192,9 @@ export const SetTableFitToWindowCommand: ICommand<ISetTableFitToWindowParams> = 
 };
 
 export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
+  SetTableCellMarginCommand,
+  ResizeTableColumnCommand,
+  ResizeTableRowCommand,
   SetTableCellBackgroundCommand,
   SetTableCellBorderCommand,
   SetTableCellVAlignCommand,
@@ -840,4 +1206,5 @@ export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
   SetTableBandedRowsCommand,
   SetTableHeaderRowCommand,
   MergeTableCellsCommand,
+  SplitTableCellsCommand,
 ];
