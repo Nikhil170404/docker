@@ -80,6 +80,7 @@ import {
 } from "./word-commands";
 import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
 import { ToggleSpellCheckCommandId } from "./spell-check";
+import { ResolveTrackedChangesCommandId, ToggleTrackChangesCommandId } from "./track-changes";
 import {
   InsertCoverPageCommandId,
   InsertTableOfContentsCommandId,
@@ -224,6 +225,12 @@ export const WORD_UI_LOCALE = {
       indentDecrease: "Decrease indent",
     },
     review: {
+      trackChanges: "Track changes",
+      trackOn: "Track changes on",
+      trackOff: "Track changes off",
+      resolveChanges: "Accept / reject",
+      acceptAll: "Accept all changes",
+      rejectAll: "Reject all changes",
       spelling: "Spelling",
       spellingOn: "Check spelling",
       spellingOff: "Off",
@@ -747,9 +754,37 @@ function buildWordMenuSchema(): MenuSchemaType {
     },
 
     [WORD_GROUP.REVIEW_COMMENTS]: {
+      [ToggleTrackChangesCommandId]: {
+        order: -3,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: ToggleTrackChangesCommandId,
+            icon: "CommentIcon",
+            title: "dockaro.review.trackChanges",
+            selections: [
+              option("dockaro.review.trackOn", { enabled: true }),
+              option("dockaro.review.trackOff", { enabled: false }),
+            ],
+          }),
+      },
+      [ResolveTrackedChangesCommandId]: {
+        order: -2,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: ResolveTrackedChangesCommandId,
+            icon: "CheckMarkIcon",
+            title: "dockaro.review.resolveChanges",
+            selections: [
+              option("dockaro.review.acceptAll", { action: "accept" }),
+              option("dockaro.review.rejectAll", { action: "reject" }),
+            ],
+          }),
+      },
       [ToggleSpellCheckCommandId]: {
         order: -1,
-        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
         menuItemFactory: (accessor: IAccessor) =>
           selector(accessor, {
             id: ToggleSpellCheckCommandId,

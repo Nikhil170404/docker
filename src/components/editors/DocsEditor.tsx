@@ -39,6 +39,7 @@ import { disableSlashMenu } from "@/lib/univer/slash-key";
 import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
 import { createWordFeatureCommands } from "@/lib/univer/word-features";
 import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-check";
+import { createTrackChanges, createTrackChangesCommands } from "@/lib/univer/track-changes";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
@@ -176,12 +177,14 @@ export default function DocsEditor({
     const injector = univer.__getInjector() as Injector;
     const commandService = injector.get(ICommandService);
     const spellChecker = createSpellChecker(injector, fDoc, () => containerRef.current);
+    const trackChanges = createTrackChanges(injector, fDoc);
     const registrations = [
       SetBorderPenCommand,
       ...ALL_TABLE_STYLE_COMMANDS,
       ...createWordCommands({ doc: fDoc, getContainer: () => containerRef.current }),
       ...createWordFeatureCommands(fDoc),
       createSpellCheckCommand(spellChecker),
+      ...createTrackChangesCommands(trackChanges),
     ].map((command) => commandService.registerCommand(command));
     commandServiceRef.current = commandService;
     documentNameRef.current = (name: string) => {
@@ -359,6 +362,7 @@ export default function DocsEditor({
       pageChrome.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
+      trackChanges.dispose();
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
       clearTimeout(statusTimeout);
