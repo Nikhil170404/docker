@@ -8,49 +8,56 @@ const tabs = [
   { href: "/editor/slides", label: "Slides", icon: Presentation, soon: true },
 ];
 
+/**
+ * The editor title bar, in the same light Word chrome as the ribbon below
+ * it: app switcher on the left, document name in the middle, actions on the
+ * right. (It used to be a dark bar sitting directly on top of Univer's
+ * light toolbar, which is exactly the seam this rework removes.)
+ */
 export default function EditorTopBar({
   active,
+  center,
   right,
 }: {
   active: "docs" | "sheets" | "slides";
+  center?: React.ReactNode;
   right?: React.ReactNode;
 }) {
   return (
-    <div className="relative shrink-0 border-b border-border bg-surface">
-      <header className="flex h-12 items-center gap-4 overflow-x-auto px-3 text-sm">
+    <div className="relative shrink-0 border-b border-word-border bg-word-chrome">
+      <header className="flex h-9 items-center gap-3 overflow-x-auto px-2 text-sm">
         <Link
           href="/"
-          className="flex shrink-0 items-center gap-1.5 text-muted transition-colors hover:text-foreground"
+          title="Back to DocKaro"
+          className="flex shrink-0 items-center gap-1.5 rounded px-1 py-1 text-word-muted transition-colors hover:bg-black/5 hover:text-word-text"
         >
-          <ArrowLeft size={16} />
-          <span className="flex h-5 w-5 items-center justify-center rounded bg-accent text-[11px] font-bold text-white">
+          <ArrowLeft size={15} />
+          <span className="flex h-5 w-5 items-center justify-center rounded bg-word-accent text-[11px] font-bold text-white">
             D
           </span>
         </Link>
-        <div className="h-5 w-px shrink-0 bg-border" />
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="h-4 w-px shrink-0 bg-word-border" />
+        <div className="flex shrink-0 items-center gap-0.5">
           {tabs.map((t) => (
             <Link
               key={t.href}
               href={t.soon ? "/pricing" : t.href}
               className={clsx(
-                "flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors",
+                "flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors",
                 active === t.href.split("/").pop()
-                  ? "bg-white/10 text-foreground"
-                  : "text-muted hover:text-foreground",
+                  ? "bg-white text-word-text shadow-sm"
+                  : "text-word-muted hover:bg-black/5 hover:text-word-text",
               )}
             >
-              <t.icon size={14} />
+              <t.icon size={13} />
               {t.label}
-              {t.soon && <span className="text-[10px] text-accent">soon</span>}
+              {t.soon && <span className="text-[10px] text-word-accent">soon</span>}
             </Link>
           ))}
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>
+        {center && <div className="mx-auto flex min-w-0 shrink items-center justify-center">{center}</div>}
+        <div className={clsx("flex shrink-0 items-center gap-2", !center && "ml-auto")}>{right}</div>
       </header>
-      {/* Hints that the bar scrolls horizontally when content overflows on
-       * narrow screens — same pattern as TableRibbon's fade. */}
-      <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-surface to-transparent" />
     </div>
   );
 }

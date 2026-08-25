@@ -12,6 +12,7 @@
     "@univerjs/docs-find-replace": "1.0.0-beta.2",
     "@univerjs/docs-ui": "1.0.0-beta.2",
     "@univerjs/engine-render": "1.0.0-beta.2",
+    "@univerjs/icons": "^1.38.0",
     "@univerjs/preset-docs-core": "1.0.0-beta.2",
     "@univerjs/preset-docs-drawing": "1.0.0-beta.2",
     "@univerjs/preset-docs-hyper-link": "1.0.0-beta.2",

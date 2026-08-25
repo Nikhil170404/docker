@@ -1,17 +1,15 @@
 import type { IDocumentBody, IDocumentData, IParagraph, ITextRun } from "@univerjs/core";
 import { NAMED_STYLE_MAP } from "@univerjs/core";
 import { convertBodyToHtml } from "@univerjs/docs-ui";
+import { DOCX_MIME_TYPE, buildDocxBlob } from "./docx/package";
 
-// Real .docx (OOXML) export needs @univerjs-pro/docs-exchange-client — Pro
-// only, and Pro purchases are paused company-wide (see table-style-
-// commands.ts's merge-command comment for the same gate on drag-resize).
-// convertBodyToHtml is the one export-adjacent piece that ships in the
-// open-source packages: it turns the document model into HTML using
-// Word's own compatibility class names (MsoNormalTable etc, verified by
-// inspecting real output), which is exactly the technique Word itself
-// uses for "Save as Web Page" — Word opens HTML documents natively, and
-// browsers print HTML to PDF natively. Both formats below are genuinely
-// functional without needing OOXML at all.
+// Word export writes a real .docx (see docx/ooxml.ts). PDF and "Web page"
+// go through convertBodyToHtml, the one export-adjacent helper that ships
+// in the open-source packages: browsers print HTML to PDF natively, and a
+// plain .html file is a genuinely useful third format. Neither needs
+// @univerjs-pro/docs-exchange-client, which is Pro-only.
+
+export type ExportFormat = "word" | "pdf" | "html";
 
 const PX_PER_INCH = 96;
 
@@ -137,8 +135,8 @@ function buildPageCss(snapshot: IDocumentData) {
   return { width, height, marginTop, marginBottom, marginLeft, marginRight };
 }
 
-function downloadBlob(content: string, mime: string, filename: string) {
-  const blob = new Blob([content], { type: mime });
+function downloadBlob(content: string | Blob, mime: string, filename: string) {
+  const blob = typeof content === "string" ? new Blob([content], { type: mime }) : content;
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -173,43 +171,16 @@ ${body}
   downloadBlob(html, "text/html", `${title}.html`);
 }
 
-// Word-compatible export via the same HTML-with-Office-namespaces
-// technique Word itself generates from "Save as Web Page" — Word opens
-// this as a real document (not a raw-text fallback). Not true OOXML
-// (.docx binary format — that needs Pro), but a legitimate, long-standing
-// interop format Word has supported for decades.
-export function exportAsWord(snapshot: IDocumentData) {
+// A genuine .docx — the OOXML package Word, Google Docs, Pages and
+// LibreOffice all open without a word of complaint. The previous export
+// wrote HTML into a .doc file, which is why users hit Word's "The file
+// format and extension of 'doc.doc' don't match. The file could be
+// corrupted or unsafe." warning on every single open, and why the file
+// silently lost styles, list numbering and page setup on the way in.
+export async function exportAsWord(snapshot: IDocumentData) {
   const title = getDocTitle(snapshot);
-  const body = buildHtmlBody(snapshot);
-  const { width, height, marginTop, marginBottom, marginLeft, marginRight } = buildPageCss(snapshot);
-  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-<meta charset="utf-8">
-<title>${escapeHtml(title)}</title>
-<!--[if gte mso 9]>
-<xml>
-<w:WordDocument>
-<w:View>Print</w:View>
-<w:Zoom>100</w:Zoom>
-</w:WordDocument>
-</xml>
-<![endif]-->
-<style>
-  @page {
-    size: ${width} ${height};
-    margin: ${marginTop} ${marginRight} ${marginBottom} ${marginLeft};
-  }
-  body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; }
-  p.UniverNormal, p.UniverHeading { margin: 0; }
-  table.UniverTable { border-collapse: collapse; }
-  table.UniverTable td.UniverTableCell { border: 1px solid #999; padding: 4px 8px; }
-</style>
-</head>
-<body>
-${body}
-</body>
-</html>`;
-  downloadBlob(html, "application/msword", `${title}.doc`);
+  const blob = await buildDocxBlob(snapshot, title);
+  downloadBlob(blob, DOCX_MIME_TYPE, `${title}.docx`);
 }
 
 // PDF via the browser's own print pipeline — a hidden iframe (not
@@ -276,4 +247,11 @@ ${body}
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+/** Single entry point used by the ribbon's Export commands. */
+export async function exportDocument(snapshot: IDocumentData, format: ExportFormat): Promise<void> {
+  if (format === "word") return exportAsWord(snapshot);
+  if (format === "pdf") return exportAsPdf(snapshot);
+  return exportAsHtml(snapshot);
 }

@@ -74,20 +74,44 @@ export function resolveLiveTableRange(
   const rectRanges = docSelectionManagerService.getRectRanges();
   const rectRange = rectRanges?.find((r) => r.tableId);
   if (rectRange) {
-    return {
+    return remember({
       tableId: rectRange.tableId,
       startRow: Math.min(rectRange.startRow, rectRange.endRow),
       endRow: Math.max(rectRange.startRow, rectRange.endRow),
       startColumn: Math.min(rectRange.startColumn, rectRange.endColumn),
       endColumn: Math.max(rectRange.startColumn, rectRange.endColumn),
-    };
+    });
   }
 
   const docRanges = docSelectionManagerService.getDocRanges();
   const cell = extractTableCellFromPath(docRanges?.[0]?.startNodePosition?.path);
   if (!cell) return null;
 
-  return { tableId: cell.tableId, startRow: cell.row, endRow: cell.row, startColumn: cell.column, endColumn: cell.column };
+  return remember({
+    tableId: cell.tableId,
+    startRow: cell.row,
+    endRow: cell.row,
+    startColumn: cell.column,
+    endColumn: cell.column,
+  });
+}
+
+// Opening a ribbon dropdown (a colour picker, a row-height menu) moves DOM
+// focus off the canvas, and Univer clears its live selection when that
+// happens — so by the time the click that applies the command lands, the
+// live lookup above can already return null. Remembering the last real
+// table selection keeps those commands working; the Table Design tab is
+// only on screen while a table selection exists in the first place.
+let rememberedRange: SelectedTableRange | null = null;
+
+function remember(range: SelectedTableRange): SelectedTableRange {
+  rememberedRange = range;
+  return range;
+}
+
+/** Called when an editor is torn down so no range leaks into the next one. */
+export function clearRememberedTableRange() {
+  rememberedRange = null;
 }
 
 // Focusing any input outside the canvas (typing a border width, a row
@@ -99,7 +123,7 @@ export function resolveLiveTableRange(
 function resolveTableRange(accessor: IAccessor, explicit?: SelectedTableRange | null): SelectedTableRange | null {
   if (explicit) return explicit;
   const docSelectionManagerService = accessor.get(DocSelectionManagerService);
-  return resolveLiveTableRange(docSelectionManagerService);
+  return resolveLiveTableRange(docSelectionManagerService) ?? rememberedRange;
 }
 
 function getDocAndTable(accessor: IAccessor, tableId: string) {
@@ -436,6 +460,127 @@ export const SetTableColumnWidthCommand: ICommand<ISetTableColumnWidthParams> = 
         params.width,
       );
     }
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Drag-resizing a column border, the way Word does it
+// ---------------------------------------------------------------------------
+//
+// Dragging a border in Word moves that border: the column on its left takes
+// the delta and the column on its right gives it back, so the table keeps
+// its overall width. Dragging the table's own right edge widens the table
+// instead. Both are one command so a drag is a single undo step.
+
+/** Word refuses to shrink a column below roughly this width. */
+const MIN_COLUMN_WIDTH = 24;
+
+export interface IResizeTableColumnParams {
+  tableId: string;
+  /** Index of the column on the left of the dragged border. */
+  columnIndex: number;
+  /** Movement in document pixels; positive widens the left column. */
+  delta: number;
+}
+
+export const ResizeTableColumnCommandId = "dockaro.command.table-resize-column";
+
+export const ResizeTableColumnCommand: ICommand<IResizeTableColumnParams> = {
+  id: ResizeTableColumnCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params || !params.delta) return false;
+    const found = getDocAndTable(accessor, params.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const left = table.tableColumns[params.columnIndex];
+    if (!left) return false;
+    const right = table.tableColumns[params.columnIndex + 1];
+    const leftWidth = left.size?.width?.v ?? 0;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    const setColumnWidth = (index: number, from: number, to: number) => {
+      setProperty(
+        jsonX,
+        rawActions,
+        ["tableSource", params.tableId, "tableColumns", index, "size", "width", "v"],
+        from,
+        to,
+      );
+    };
+
+    if (right) {
+      const rightWidth = right.size?.width?.v ?? 0;
+      // Clamp the drag so neither side collapses; the border simply stops.
+      const delta = Math.max(
+        MIN_COLUMN_WIDTH - leftWidth,
+        Math.min(rightWidth - MIN_COLUMN_WIDTH, params.delta),
+      );
+      if (!delta) return false;
+      setColumnWidth(params.columnIndex, leftWidth, leftWidth + delta);
+      setColumnWidth(params.columnIndex + 1, rightWidth, rightWidth - delta);
+    } else {
+      const delta = Math.max(MIN_COLUMN_WIDTH - leftWidth, params.delta);
+      if (!delta) return false;
+      setColumnWidth(params.columnIndex, leftWidth, leftWidth + delta);
+      const tableWidth = table.size?.width?.v;
+      if (typeof tableWidth === "number") {
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", params.tableId, "size", "width", "v"],
+          tableWidth,
+          tableWidth + delta,
+        );
+      }
+    }
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Drag-resizing a row border
+// ---------------------------------------------------------------------------
+
+/** Word's minimum row height, in document pixels. */
+const MIN_ROW_HEIGHT = 16;
+
+export interface IResizeTableRowParams {
+  tableId: string;
+  rowIndex: number;
+  /** The row's new height in document pixels. */
+  height: number;
+}
+
+export const ResizeTableRowCommandId = "dockaro.command.table-resize-row";
+
+export const ResizeTableRowCommand: ICommand<IResizeTableRowParams> = {
+  id: ResizeTableRowCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const found = getDocAndTable(accessor, params.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+    const row = table.tableRows[params.rowIndex];
+    if (!row) return false;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    setProperty(
+      jsonX,
+      rawActions,
+      ["tableSource", params.tableId, "tableRows", params.rowIndex, "trHeight"],
+      row.trHeight,
+      // Dragging a row border in Word sets a minimum height, not a fixed
+      // one: the row still grows if its content needs more space.
+      { val: { v: Math.max(MIN_ROW_HEIGHT, params.height) }, hRule: TableRowHeightRule.AT_LEAST },
+    );
 
     return runMutation(accessor, docDataModel, rawActions);
   },
@@ -829,6 +974,8 @@ export const SetTableFitToWindowCommand: ICommand<ISetTableFitToWindowParams> = 
 };
 
 export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
+  ResizeTableColumnCommand,
+  ResizeTableRowCommand,
   SetTableCellBackgroundCommand,
   SetTableCellBorderCommand,
   SetTableCellVAlignCommand,

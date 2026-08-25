@@ -1,0 +1,852 @@
+import { UniverInstanceType } from "@univerjs/core";
+import type { IAccessor, IDisposable, Injector } from "@univerjs/core";
+import {
+  COLOR_PICKER_COMPONENT,
+  IMenuManagerService,
+  IRibbonService,
+  IconManager,
+  MenuItemType,
+  RibbonInsertGroup,
+  RibbonStartGroup,
+  getMenuHiddenObservable,
+} from "@univerjs/ui";
+import type { IMenuButtonItem, IMenuSelectorItem, IValueOption, MenuSchemaType } from "@univerjs/ui";
+import {
+  DocTableDeleteColumnsCommand,
+  DocTableDeleteRowsCommand,
+  DocTableDeleteTableCommand,
+  DocTableInsertColumnLeftCommand,
+  DocTableInsertColumnRightCommand,
+  DocTableInsertRowAboveCommand,
+  DocTableInsertRowBellowCommand,
+} from "@univerjs/docs-ui";
+import {
+  AdjustWidthDoubleIcon,
+  LineIndentDecreaseIcon,
+  LineIndentIncreaseIcon,
+  AlignBottomIcon,
+  AlignTopIcon,
+  AllBorderIcon,
+  AutoHeightDoubleIcon,
+  CommentIcon,
+  DocsMultiIcon,
+  DownBorderDoubleIcon,
+  ExportIcon,
+  FlipHorizontalIcon,
+  LeftBorderDoubleIcon,
+  NoBorderIcon,
+  PrintIcon,
+  RightBorderDoubleIcon,
+  RowHeightTallIcon,
+  ShapeFrameIcon,
+  ShapeRectIcon,
+  ShrinkToFitIcon,
+  UpBorderDoubleIcon,
+  ZoomInIcon,
+} from "@univerjs/icons";
+import {
+  EditHeaderFooterCommandId,
+  ExportDocumentCommandId,
+  InsertPageBreakCommandId,
+  MARGIN_PRESETS,
+  PAGE_SIZE_PRESETS,
+  SetIndentCommandId,
+  SetLineSpacingCommandId,
+  SetPageMarginsCommandId,
+  SetPageOrientationCommandId,
+  SetPageSizeCommandId,
+  SetParagraphSpaceCommandId,
+  SetZoomCommandId,
+  PX_PER_INCH,
+} from "./word-commands";
+import {
+  SetTableBandedRowsCommandId,
+  SetTableCellAlignCommandId,
+  SetTableCellBackgroundCommandId,
+  SetTableCellBorderCommandId,
+  SetTableColumnWidthCommandId,
+  SetTableFitToWindowCommandId,
+  SetTableHeaderRowCommandId,
+  SetTableLayoutCommandId,
+  SetTableRowHeightCommandId,
+  type BorderSide,
+} from "./table-style-commands";
+
+// Word's ribbon, built out of Univer's own ribbon machinery rather than a
+// second toolbar bolted on next to it. Univer's `grid` ribbon already has
+// the shape Word's has — a tab strip over grouped, two-row controls — so
+// what's left is: name the tabs the way Word names them, move Univer's
+// page/header items onto a Layout tab, add the Word features Univer has no
+// toolbar entry for, and give tables a real contextual tab. Everything
+// here is a menu item bound to a registered command, so the same actions
+// stay reachable from context menus and shortcuts.
+
+/** Univer's fixed ribbon positions, re-labelled as Word's tabs. */
+export const WORD_TAB = {
+  FILE: "ribbon.others",
+  HOME: "ribbon.start",
+  INSERT: "ribbon.insert",
+  LAYOUT: "ribbon.formulas",
+  REVIEW: "ribbon.data",
+  VIEW: "ribbon.view",
+  TABLE: "ribbon.tableDesign",
+} as const;
+
+const WORD_GROUP = {
+  FILE: "ribbon.others.others",
+  LAYOUT_PAGE: "ribbon.formulas.basic",
+  LAYOUT_PARAGRAPH: "ribbon.formulas.others",
+  REVIEW_COMMENTS: "ribbon.data.rules",
+  VIEW_ZOOM: "ribbon.view.display",
+  TABLE_STYLE: "ribbon.tableDesign.style",
+  TABLE_BORDERS: "ribbon.tableDesign.borders",
+  TABLE_LAYOUT: "ribbon.tableDesign.cells",
+  TABLE_ROWS: "ribbon.tableDesign.rows",
+} as const;
+
+const COMMENT_PANEL_COMMAND_ID = "docs.operation.toggle-comment-panel";
+const ADD_COMMENT_COMMAND_ID = "docs.operation.start-add-comment";
+/** Univer's own items that Word keeps on other tabs than Univer does. */
+export const HEADER_FOOTER_PANEL_COMMAND_ID = "doc.command.open-header-footer-panel";
+export const PAGE_SETTING_COMMAND_ID = "docs.operation.open-page-setting";
+
+/**
+ * Tab names, and titles for every control this app adds. Univer's own
+ * locale keys stay untouched; `ui.ribbon.*` is overridden so the tab strip
+ * reads Home / Insert / Layout / Review / View like Word's does.
+ */
+export const WORD_UI_LOCALE = {
+  ui: {
+    ribbon: {
+      start: "Home",
+      startDesc: "Fonts, paragraphs and styles.",
+      insert: "Insert",
+      insertDesc: "Tables, pictures, links and breaks.",
+      formulas: "Layout",
+      formulasDesc: "Margins, orientation, size and paragraph spacing.",
+      data: "Review",
+      dataDesc: "Comments and revisions.",
+      view: "View",
+      viewDesc: "Zoom and display options.",
+      others: "File",
+      othersDesc: "Export, print and page setup.",
+    },
+  },
+  dockaro: {
+    file: {
+      export: "Export",
+      exportWord: "Word document (.docx)",
+      exportPdf: "PDF",
+      exportHtml: "Web page (.html)",
+      print: "Print",
+      pageSetup: "Page setup",
+    },
+    layout: {
+      margins: "Margins",
+      marginsNormal: "Normal (1 inch)",
+      marginsNarrow: "Narrow (0.5 inch)",
+      marginsModerate: "Moderate",
+      marginsWide: "Wide (2 inch)",
+      orientation: "Orientation",
+      portrait: "Portrait",
+      landscape: "Landscape",
+      size: "Size",
+      pageBreak: "Page break",
+      headerFooter: "Header & footer",
+      spaceBefore: "Space before",
+      spaceAfter: "Space after",
+      spaceNone: "None",
+    },
+    paragraph: {
+      lineSpacing: "Line spacing",
+      indentIncrease: "Increase indent",
+      indentDecrease: "Decrease indent",
+    },
+    review: {
+      newComment: "New comment",
+      comments: "Comments",
+    },
+    view: {
+      zoom: "Zoom",
+    },
+    table: {
+      title: "Table Design",
+      titleDesc: "Shading, borders and cell layout for the selected table.",
+      shading: "Shading",
+      shadingClear: "No shading",
+      borders: "Borders",
+      borderColor: "Border color",
+      bordersAll: "All borders",
+      bordersNone: "No border",
+      borderTop: "Top border",
+      borderBottom: "Bottom border",
+      borderLeft: "Left border",
+      borderRight: "Right border",
+      headerRow: "Header row",
+      bandedRows: "Banded rows",
+      bandedGrey: "Banded - grey",
+      bandedBlue: "Banded - blue",
+      off: "Off",
+      align: "Cell alignment",
+      rowHeight: "Row height",
+      columnWidth: "Column width",
+      autoFit: "AutoFit",
+      autoFitContents: "AutoFit contents",
+      autoFitWindow: "AutoFit window",
+      fixedWidth: "Fixed column width",
+      insert: "Insert",
+      insertRowAbove: "Insert row above",
+      insertRowBelow: "Insert row below",
+      insertColumnLeft: "Insert column left",
+      insertColumnRight: "Insert column right",
+      delete: "Delete",
+      deleteRow: "Delete row",
+      deleteColumn: "Delete column",
+      deleteTable: "Delete table",
+    },
+  },
+};
+
+/** Icons this app's ribbon items use that Univer doesn't already register. */
+const WORD_ICONS = {
+  AdjustWidthDoubleIcon,
+  // docs-ui imports these two but never registers them, so its own indent
+  // menu ids resolve to an empty icon; registering them here fixes both.
+  LineIndentDecreaseIcon,
+  LineIndentIncreaseIcon,
+  AlignBottomIcon,
+  AlignTopIcon,
+  AllBorderIcon,
+  AutoHeightDoubleIcon,
+  CommentIcon,
+  DocsMultiIcon,
+  DownBorderDoubleIcon,
+  ExportIcon,
+  FlipHorizontalIcon,
+  LeftBorderDoubleIcon,
+  NoBorderIcon,
+  PrintIcon,
+  RightBorderDoubleIcon,
+  RowHeightTallIcon,
+  ShapeFrameIcon,
+  ShapeRectIcon,
+  ShrinkToFitIcon,
+  UpBorderDoubleIcon,
+  ZoomInIcon,
+};
+
+interface ButtonOptions {
+  id: string;
+  commandId?: string;
+  icon: string;
+  title: string;
+  params?: Record<string, unknown>;
+}
+
+function button(accessor: IAccessor, options: ButtonOptions): IMenuButtonItem {
+  return {
+    id: options.id,
+    commandId: options.commandId,
+    type: MenuItemType.BUTTON,
+    icon: options.icon,
+    title: options.title,
+    tooltip: options.title,
+    params: options.params,
+    hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+  };
+}
+
+interface SelectorOptions {
+  id: string;
+  commandId?: string;
+  icon: string;
+  title: string;
+  selections: IValueOption[];
+}
+
+function selector(accessor: IAccessor, options: SelectorOptions): IMenuSelectorItem {
+  return {
+    id: options.id,
+    commandId: options.commandId,
+    type: MenuItemType.SUBITEMS,
+    icon: options.icon,
+    title: options.title,
+    tooltip: options.title,
+    selections: options.selections,
+    hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+  };
+}
+
+/** A dropdown entry that always sends the same fixed params. */
+function option(label: string, params: Record<string, unknown>, icon?: string): IValueOption {
+  return { label, value: label, icon, params: () => params };
+}
+
+const LINE_SPACINGS = [1, 1.15, 1.5, 2, 2.5, 3];
+const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
+const ROW_HEIGHTS = [24, 32, 40, 48, 64];
+const COLUMN_WIDTHS = [80, 100, 120, 160, 200];
+/** Word's own "space before/after paragraph" presets, in points. */
+const PARAGRAPH_SPACES = [0, 6, 12, 18];
+const ALL_BORDER_SIDES: BorderSide[] = ["Top", "Bottom", "Left", "Right"];
+const DEFAULT_BORDER = { color: "#000000", width: 1 };
+
+const CELL_ALIGNMENTS: { label: string; icon: string; horizontal: number; vertical: number }[] = [
+  // HorizontalAlign LEFT/CENTER/RIGHT = 1/2/3, VerticalAlignmentType TOP/CENTER/BOTTOM = 2/3/4.
+  { label: "Top left", icon: "AlignTopIcon", horizontal: 1, vertical: 2 },
+  { label: "Top center", icon: "AlignTopIcon", horizontal: 2, vertical: 2 },
+  { label: "Top right", icon: "AlignTopIcon", horizontal: 3, vertical: 2 },
+  { label: "Middle left", icon: "HorizontallyIcon", horizontal: 1, vertical: 3 },
+  { label: "Middle center", icon: "HorizontallyIcon", horizontal: 2, vertical: 3 },
+  { label: "Middle right", icon: "HorizontallyIcon", horizontal: 3, vertical: 3 },
+  { label: "Bottom left", icon: "AlignBottomIcon", horizontal: 1, vertical: 4 },
+  { label: "Bottom center", icon: "AlignBottomIcon", horizontal: 2, vertical: 4 },
+  { label: "Bottom right", icon: "AlignBottomIcon", horizontal: 3, vertical: 4 },
+];
+
+function buildWordMenuSchema(): MenuSchemaType {
+  return {
+    [WORD_GROUP.FILE]: {
+      [ExportDocumentCommandId]: {
+        order: 0,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: ExportDocumentCommandId,
+            icon: "ExportIcon",
+            title: "dockaro.file.export",
+            selections: [
+              option("dockaro.file.exportWord", { format: "word" }),
+              option("dockaro.file.exportPdf", { format: "pdf" }),
+              option("dockaro.file.exportHtml", { format: "html" }),
+            ],
+          }),
+      },
+      "dockaro.menu.print": {
+        order: 1,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.print",
+            commandId: ExportDocumentCommandId,
+            icon: "PrintIcon",
+            title: "dockaro.file.print",
+            params: { format: "pdf" },
+          }),
+      },
+      "dockaro.menu.page-setup": {
+        order: 2,
+        gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.page-setup",
+            commandId: PAGE_SETTING_COMMAND_ID,
+            icon: "DocSettingIcon",
+            title: "dockaro.file.pageSetup",
+          }),
+      },
+    },
+
+    [RibbonStartGroup.LAYOUT]: {
+      [SetIndentCommandId]: {
+        order: 20,
+        gridLayout: { row: 1, column: 3 },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: SetIndentCommandId,
+            icon: "LineIndentIncreaseIcon",
+            title: "dockaro.paragraph.indentIncrease",
+            params: { direction: "increase" },
+          }),
+      },
+      "dockaro.menu.indent-decrease": {
+        order: 21,
+        gridLayout: { row: 2, column: 3 },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.indent-decrease",
+            commandId: SetIndentCommandId,
+            icon: "LineIndentDecreaseIcon",
+            title: "dockaro.paragraph.indentDecrease",
+            params: { direction: "decrease" },
+          }),
+      },
+      [SetLineSpacingCommandId]: {
+        order: 22,
+        gridLayout: { row: 1, column: 4, rowSpan: 2 },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetLineSpacingCommandId,
+            icon: "RowHeightTallIcon",
+            title: "dockaro.paragraph.lineSpacing",
+            selections: LINE_SPACINGS.map((value) => option(value.toFixed(2).replace(/0$/, ""), { value })),
+          }),
+      },
+    },
+
+    [RibbonInsertGroup.MEDIA]: {
+      [InsertPageBreakCommandId]: {
+        order: 10,
+        gridLayout: { row: 1, column: 5, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: InsertPageBreakCommandId,
+            icon: "DocsMultiIcon",
+            title: "dockaro.layout.pageBreak",
+          }),
+      },
+      [EditHeaderFooterCommandId]: {
+        order: 11,
+        gridLayout: { row: 1, column: 6, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: EditHeaderFooterCommandId,
+            icon: "HeaderFooterIcon",
+            title: "dockaro.layout.headerFooter",
+          }),
+      },
+    },
+
+    [WORD_GROUP.LAYOUT_PAGE]: {
+      [SetPageMarginsCommandId]: {
+        order: 0,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetPageMarginsCommandId,
+            icon: "ShapeFrameIcon",
+            title: "dockaro.layout.margins",
+            selections: (Object.keys(MARGIN_PRESETS) as (keyof typeof MARGIN_PRESETS)[]).map((preset) =>
+              option(`dockaro.layout.margins${preset[0].toUpperCase()}${preset.slice(1)}`, { preset }),
+            ),
+          }),
+      },
+      [SetPageOrientationCommandId]: {
+        order: 1,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetPageOrientationCommandId,
+            icon: "FlipHorizontalIcon",
+            title: "dockaro.layout.orientation",
+            selections: [
+              option("dockaro.layout.portrait", { orientation: "portrait" }),
+              option("dockaro.layout.landscape", { orientation: "landscape" }),
+            ],
+          }),
+      },
+      [SetPageSizeCommandId]: {
+        order: 2,
+        gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetPageSizeCommandId,
+            icon: "ShapeRectIcon",
+            title: "dockaro.layout.size",
+            selections: PAGE_SIZE_PRESETS.map((size) => option(size, { size })),
+          }),
+      },
+      "dockaro.menu.layout-page-break": {
+        order: 3,
+        gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.layout-page-break",
+            commandId: InsertPageBreakCommandId,
+            icon: "DocsMultiIcon",
+            title: "dockaro.layout.pageBreak",
+          }),
+      },
+      "dockaro.menu.layout-header-footer": {
+        order: 4,
+        gridLayout: { row: 1, column: 5, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.layout-header-footer",
+            commandId: EditHeaderFooterCommandId,
+            icon: "HeaderFooterIcon",
+            title: "dockaro.layout.headerFooter",
+          }),
+      },
+    },
+
+    [WORD_GROUP.LAYOUT_PARAGRAPH]: {
+      [SetParagraphSpaceCommandId]: {
+        order: 0,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetParagraphSpaceCommandId,
+            icon: "AutoHeightDoubleIcon",
+            title: "dockaro.layout.spaceBefore",
+            selections: PARAGRAPH_SPACES.map((points) =>
+              option(points === 0 ? "dockaro.layout.spaceNone" : `${points} pt`, {
+                above: (points * PX_PER_INCH) / 72,
+              }),
+            ),
+          }),
+      },
+      "dockaro.menu.space-after": {
+        order: 1,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: "dockaro.menu.space-after",
+            commandId: SetParagraphSpaceCommandId,
+            icon: "AutoHeightDoubleIcon",
+            title: "dockaro.layout.spaceAfter",
+            selections: PARAGRAPH_SPACES.map((points) =>
+              option(points === 0 ? "dockaro.layout.spaceNone" : `${points} pt`, {
+                below: (points * PX_PER_INCH) / 72,
+              }),
+            ),
+          }),
+      },
+    },
+
+    [WORD_GROUP.REVIEW_COMMENTS]: {
+      "dockaro.menu.new-comment": {
+        order: 0,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.new-comment",
+            commandId: ADD_COMMENT_COMMAND_ID,
+            icon: "CommentIcon",
+            title: "dockaro.review.newComment",
+          }),
+      },
+      "dockaro.menu.comment-panel": {
+        order: 1,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: "dockaro.menu.comment-panel",
+            commandId: COMMENT_PANEL_COMMAND_ID,
+            icon: "CommentIcon",
+            title: "dockaro.review.comments",
+          }),
+      },
+    },
+
+    [WORD_GROUP.VIEW_ZOOM]: {
+      [SetZoomCommandId]: {
+        order: 0,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetZoomCommandId,
+            icon: "ZoomInIcon",
+            title: "dockaro.view.zoom",
+            selections: ZOOM_LEVELS.map((value) => option(`${value}%`, { value })),
+          }),
+      },
+    },
+  };
+}
+
+/**
+ * Word shows table tools only while the cursor is inside a table, on a tab
+ * that appears next to the permanent ones. Univer's ribbon supports exactly
+ * that through `contextual`, so the table controls live in a real
+ * contextual tab instead of a second toolbar that is always on screen.
+ */
+function buildRootMenuOverrides(): MenuSchemaType {
+  return {
+    ribbon: {
+      // Word opens with File first; Univer's spare "others" tab is where
+      // this app's File items live, so it moves to the front of the strip.
+      [WORD_TAB.FILE]: { order: -1 },
+      [WORD_TAB.TABLE]: {
+        order: 6,
+        title: "dockaro.table.title",
+        contextual: true,
+
+        [WORD_GROUP.TABLE_STYLE]: {
+          order: 0,
+          [SetTableCellBackgroundCommandId]: {
+            order: 0,
+            gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor): IMenuSelectorItem => ({
+              id: SetTableCellBackgroundCommandId,
+              type: MenuItemType.SUBITEMS,
+              icon: "PaintBucketDoubleIcon",
+              title: "dockaro.table.shading",
+              tooltip: "dockaro.table.shading",
+              selections: [
+                {
+                  label: { name: COLOR_PICKER_COMPONENT, hoverable: false, selectable: false },
+                  params: (value?: string | number) => ({ color: value }),
+                },
+              ],
+              hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+            }),
+          },
+          "dockaro.menu.table-shading-clear": {
+            order: 1,
+            gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              button(accessor, {
+                id: "dockaro.menu.table-shading-clear",
+                commandId: SetTableCellBackgroundCommandId,
+                icon: "NoColorDoubleIcon",
+                title: "dockaro.table.shadingClear",
+                params: { color: null },
+              }),
+          },
+          [SetTableHeaderRowCommandId]: {
+            order: 2,
+            gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableHeaderRowCommandId,
+                icon: "GridIcon",
+                title: "dockaro.table.headerRow",
+                selections: [
+                  option("dockaro.table.headerRow", { enabled: true }),
+                  option("dockaro.table.off", { enabled: false }),
+                ],
+              }),
+          },
+          [SetTableBandedRowsCommandId]: {
+            order: 3,
+            gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableBandedRowsCommandId,
+                icon: "GridIcon",
+                title: "dockaro.table.bandedRows",
+                selections: [
+                  option("dockaro.table.bandedGrey", {
+                    enabled: true,
+                    colorOdd: "#F2F2F2",
+                    colorEven: "#FFFFFF",
+                  }),
+                  option("dockaro.table.bandedBlue", {
+                    enabled: true,
+                    colorOdd: "#DEEAF6",
+                    colorEven: "#FFFFFF",
+                  }),
+                  option("dockaro.table.off", { enabled: false }),
+                ],
+              }),
+          },
+        },
+
+        [WORD_GROUP.TABLE_BORDERS]: {
+          order: 1,
+          [SetTableCellBorderCommandId]: {
+            order: 0,
+            gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableCellBorderCommandId,
+                icon: "AllBorderIcon",
+                title: "dockaro.table.borders",
+                selections: [
+                  option("dockaro.table.bordersAll", { sides: ALL_BORDER_SIDES, ...DEFAULT_BORDER }, "AllBorderIcon"),
+                  option("dockaro.table.borderTop", { sides: ["Top"], ...DEFAULT_BORDER }, "UpBorderDoubleIcon"),
+                  option(
+                    "dockaro.table.borderBottom",
+                    { sides: ["Bottom"], ...DEFAULT_BORDER },
+                    "DownBorderDoubleIcon",
+                  ),
+                  option("dockaro.table.borderLeft", { sides: ["Left"], ...DEFAULT_BORDER }, "LeftBorderDoubleIcon"),
+                  option("dockaro.table.borderRight", { sides: ["Right"], ...DEFAULT_BORDER }, "RightBorderDoubleIcon"),
+                  option(
+                    "dockaro.table.bordersNone",
+                    { sides: ALL_BORDER_SIDES, color: null, width: 1 },
+                    "NoBorderIcon",
+                  ),
+                ],
+              }),
+          },
+          "dockaro.menu.table-border-color": {
+            order: 1,
+            gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor): IMenuSelectorItem => ({
+              id: "dockaro.menu.table-border-color",
+              commandId: SetTableCellBorderCommandId,
+              type: MenuItemType.SUBITEMS,
+              icon: "FontColorDoubleIcon",
+              title: "dockaro.table.borderColor",
+              tooltip: "dockaro.table.borderColor",
+              selections: [
+                {
+                  label: { name: COLOR_PICKER_COMPONENT, hoverable: false, selectable: false },
+                  params: (value?: string | number) => ({ sides: ALL_BORDER_SIDES, color: value, width: 1 }),
+                },
+              ],
+              hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+            }),
+          },
+        },
+
+        [WORD_GROUP.TABLE_LAYOUT]: {
+          order: 2,
+          [SetTableCellAlignCommandId]: {
+            order: 0,
+            gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableCellAlignCommandId,
+                icon: "HorizontallyIcon",
+                title: "dockaro.table.align",
+                selections: CELL_ALIGNMENTS.map((alignment) =>
+                  option(alignment.label, { horizontal: alignment.horizontal, vertical: alignment.vertical }, alignment.icon),
+                ),
+              }),
+          },
+          [SetTableRowHeightCommandId]: {
+            order: 1,
+            gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableRowHeightCommandId,
+                icon: "AutoHeightDoubleIcon",
+                title: "dockaro.table.rowHeight",
+                selections: [
+                  option("dockaro.table.autoFit", { mode: "auto" }),
+                  ...ROW_HEIGHTS.map((height) => option(`${height} px`, { mode: "fixed", height })),
+                ],
+              }),
+          },
+          [SetTableColumnWidthCommandId]: {
+            order: 2,
+            gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableColumnWidthCommandId,
+                icon: "AdjustWidthDoubleIcon",
+                title: "dockaro.table.columnWidth",
+                selections: COLUMN_WIDTHS.map((width) => option(`${width} px`, { width })),
+              }),
+          },
+          [SetTableLayoutCommandId]: {
+            order: 3,
+            gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableLayoutCommandId,
+                icon: "ShrinkToFitIcon",
+                title: "dockaro.table.autoFit",
+                selections: [
+                  option("dockaro.table.autoFitContents", { layout: "auto" }),
+                  { label: "dockaro.table.autoFitWindow", value: "window", id: SetTableFitToWindowCommandId },
+                  option("dockaro.table.fixedWidth", { layout: "fixed" }),
+                ],
+              }),
+          },
+        },
+
+        [WORD_GROUP.TABLE_ROWS]: {
+          order: 3,
+          "dockaro.menu.table-insert": {
+            order: 0,
+            gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: "dockaro.menu.table-insert",
+                icon: "InsertRowAboveDoubleIcon",
+                title: "dockaro.table.insert",
+                selections: [
+                  {
+                    label: "dockaro.table.insertRowAbove",
+                    value: "row-above",
+                    id: DocTableInsertRowAboveCommand.id,
+                    icon: "InsertRowAboveDoubleIcon",
+                  },
+                  {
+                    label: "dockaro.table.insertRowBelow",
+                    value: "row-below",
+                    id: DocTableInsertRowBellowCommand.id,
+                    icon: "InsertRowBelowDoubleIcon",
+                  },
+                  {
+                    label: "dockaro.table.insertColumnLeft",
+                    value: "column-left",
+                    id: DocTableInsertColumnLeftCommand.id,
+                    icon: "LeftInsertColumnDoubleIcon",
+                  },
+                  {
+                    label: "dockaro.table.insertColumnRight",
+                    value: "column-right",
+                    id: DocTableInsertColumnRightCommand.id,
+                    icon: "RightInsertColumnDoubleIcon",
+                  },
+                ],
+              }),
+          },
+          "dockaro.menu.table-delete": {
+            order: 1,
+            gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: "dockaro.menu.table-delete",
+                icon: "DeleteRowDoubleIcon",
+                title: "dockaro.table.delete",
+                selections: [
+                  {
+                    label: "dockaro.table.deleteRow",
+                    value: "row",
+                    id: DocTableDeleteRowsCommand.id,
+                    icon: "DeleteRowDoubleIcon",
+                  },
+                  {
+                    label: "dockaro.table.deleteColumn",
+                    value: "column",
+                    id: DocTableDeleteColumnsCommand.id,
+                    icon: "DeleteColumnDoubleIcon",
+                  },
+                  {
+                    label: "dockaro.table.deleteTable",
+                    value: "table",
+                    id: DocTableDeleteTableCommand.id,
+                    icon: "DeleteTableDoubleIcon",
+                  },
+                ],
+              }),
+          },
+        },
+      },
+    },
+  };
+}
+
+export interface WordRibbon extends IDisposable {
+  /** Shows or hides the contextual Table Design tab, as Word does. */
+  setTableContextActive: (active: boolean) => void;
+}
+
+export function installWordRibbon(injector: Injector): WordRibbon {
+  const iconManager = injector.get(IconManager);
+  const menuManagerService = injector.get(IMenuManagerService);
+  const ribbonService = injector.get(IRibbonService);
+
+  const iconDisposable = iconManager.register(WORD_ICONS);
+  menuManagerService.appendRootMenu(buildRootMenuOverrides());
+  menuManagerService.mergeMenu(buildWordMenuSchema());
+
+  let tableTabVisible = false;
+
+  return {
+    setTableContextActive: (active: boolean) => {
+      if (active === tableTabVisible) return;
+      tableTabVisible = active;
+      // Word reveals the tab but leaves the active one alone, so a click
+      // into a table never yanks the ribbon out from under the user.
+      if (active) ribbonService.showContextualTab(WORD_TAB.TABLE);
+      else ribbonService.hideContextualTab(WORD_TAB.TABLE);
+    },
+    dispose: () => {
+      ribbonService.hideAllContextualTabs();
+      iconDisposable.dispose();
+    },
+  };
+}
+
+/** Command ids Univer puts on its own tabs that this ribbon relocates. */
+export const RELOCATED_UNIVER_MENU_ITEMS = {
+  [HEADER_FOOTER_PANEL_COMMAND_ID]: { hidden: true },
+  [PAGE_SETTING_COMMAND_ID]: { hidden: true },
+};
