@@ -1,6 +1,7 @@
 import type {
   DocumentDataModel,
   IAccessor,
+  Nullable,
   IColorStyle,
   ICommand,
   IMutationInfo,
@@ -24,7 +25,7 @@ import {
   VerticalAlignmentType,
 } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, RichTextEditingMutation } from "@univerjs/docs";
-import { IRenderManagerService } from "@univerjs/engine-render";
+import { getTableIdAndSliceIndex, IRenderManagerService } from "@univerjs/engine-render";
 import { getCommandSkeleton } from "@univerjs/docs-ui";
 
 // These commands fill a real gap in Univer's open-source Docs table plugin:
@@ -52,22 +53,40 @@ export type SelectedTableRange = {
 
 // A caret merely positioned inside one cell (no drag-selected block) never
 // produces a rectRange — confirmed in 1.0.0-beta.2, where a plain click
-// into a cell yields getRectRanges() === []. Table identity for a plain
-// caret only shows up in getDocRanges()'s startNodePosition.path, shaped
-// like ["pages", 0, "skeTables", tableId, "rows", r, "cells", c, ...].
-function extractTableCellFromPath(
-  path: (string | number)[] | undefined,
+// into a cell yields getRectRanges() === []. Which cell it is has to come
+// from the document itself: the selection's skeleton path names a *slice*
+// of the table, not the table (a table that spills onto a second page is
+// laid out as several skeleton tables, `${tableId}#-#0`, `#-#1`, ... each
+// numbering its rows from zero again), so reading row and column off the
+// path silently addresses the wrong cell — or no cell at all, since the
+// slice id is not a key in `tableSource`.
+//
+// Counting the model's own row/cell tokens up to the caret has neither
+// problem: the tokens are the table, whole, however it happens to be
+// paginated.
+function findCellAtOffset(
+  docDataModel: DocumentDataModel,
+  offset: number,
 ): { tableId: string; row: number; column: number } | null {
-  if (!path) return null;
-  const tablesIdx = path.indexOf("skeTables");
-  if (tablesIdx === -1) return null;
-  const tableId = path[tablesIdx + 1];
-  const rowsIdx = path.indexOf("rows", tablesIdx);
-  const cellsIdx = path.indexOf("cells", tablesIdx);
-  const row = rowsIdx === -1 ? undefined : path[rowsIdx + 1];
-  const column = cellsIdx === -1 ? undefined : path[cellsIdx + 1];
-  if (typeof tableId !== "string" || typeof row !== "number" || typeof column !== "number") return null;
-  return { tableId, row, column };
+  const body = docDataModel.getBody();
+  const table = body?.tables?.find((t) => offset > t.startIndex && offset < t.endIndex);
+  if (!body || !table) return null;
+
+  const { dataStream } = body;
+  let row = -1;
+  let column = -1;
+  for (let i = table.startIndex; i < table.endIndex && i < offset; i++) {
+    const char = dataStream[i];
+    if (char === TABLE_ROW_START_TOKEN) {
+      row++;
+      column = -1;
+    } else if (char === TABLE_CELL_START_TOKEN) {
+      column++;
+    }
+  }
+  if (row < 0 || column < 0) return null;
+
+  return { tableId: table.tableId, row, column };
 }
 
 // The single source of truth for "what table cell(s) is the user's live
@@ -76,12 +95,15 @@ function extractTableCellFromPath(
 // Design ribbon's visibility.
 export function resolveLiveTableRange(
   docSelectionManagerService: DocSelectionManagerService,
+  docDataModel: Nullable<DocumentDataModel>,
 ): SelectedTableRange | null {
   const rectRanges = docSelectionManagerService.getRectRanges();
   const rectRange = rectRanges?.find((r) => r.tableId);
   if (rectRange) {
+    // A rect range's rows and columns are already absolute, but its
+    // tableId is the slice's.
     return remember({
-      tableId: rectRange.tableId,
+      tableId: getTableIdAndSliceIndex(rectRange.tableId).tableId,
       startRow: Math.min(rectRange.startRow, rectRange.endRow),
       endRow: Math.max(rectRange.startRow, rectRange.endRow),
       startColumn: Math.min(rectRange.startColumn, rectRange.endColumn),
@@ -89,8 +111,8 @@ export function resolveLiveTableRange(
     });
   }
 
-  const docRanges = docSelectionManagerService.getDocRanges();
-  const cell = extractTableCellFromPath(docRanges?.[0]?.startNodePosition?.path);
+  const offset = docSelectionManagerService.getDocRanges()?.[0]?.startOffset;
+  const cell = docDataModel && offset != null ? findCellAtOffset(docDataModel, offset) : null;
   if (!cell) return null;
 
   return remember({
@@ -129,7 +151,10 @@ export function clearRememberedTableRange() {
 function resolveTableRange(accessor: IAccessor, explicit?: SelectedTableRange | null): SelectedTableRange | null {
   if (explicit) return explicit;
   const docSelectionManagerService = accessor.get(DocSelectionManagerService);
-  return resolveLiveTableRange(docSelectionManagerService) ?? rememberedRange;
+  const docDataModel = accessor
+    .get(IUniverInstanceService)
+    .getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC);
+  return resolveLiveTableRange(docSelectionManagerService, docDataModel) ?? rememberedRange;
 }
 
 function getDocAndTable(accessor: IAccessor, tableId: string) {
@@ -318,13 +343,18 @@ export const SetTableCellBorderCommand: ICommand<ISetTableCellBorderParams> = {
 
         for (const side of params.sides) {
           const key = `border${side}` as const;
+          // Word's "No border" has to leave a border behind: Univer's
+          // renderer falls back to a default grey line whenever a cell has
+          // no border property at all, and only skips drawing when the
+          // border it finds is zero-width or transparent. Deleting the
+          // property would put the default line back.
           const newVal = params.color
             ? {
                 color: { rgb: params.color },
                 width: { v: params.width },
                 dashStyle: params.dashStyle ?? DashStyleType.SOLID,
               }
-            : undefined;
+            : { color: { rgb: "transparent" }, width: { v: 0 }, dashStyle: DashStyleType.SOLID };
 
           setProperty(
             jsonX,
@@ -383,6 +413,64 @@ export const SetTableCellVAlignCommand: ICommand<ISetTableCellVAlignParams> = {
     }
 
     return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cell margins (Word's Table Layout > Cell Margins)
+// ---------------------------------------------------------------------------
+//
+// The padding inside every cell, set for the table as a whole - which is
+// how Word's own Table Options dialog scopes it. Univer's model already
+// carries it (ITable.cellMargin) and the renderer already reads it; there
+// was just no way to change it.
+
+export interface ISetTableCellMarginParams {
+  margin: { start: number; end: number; top: number; bottom: number };
+  range?: SelectedTableRange | null;
+}
+
+export const SetTableCellMarginCommandId = "dockaro.command.table-cell-margin";
+
+export const SetTableCellMarginCommand: ICommand<ISetTableCellMarginParams> = {
+  id: SetTableCellMarginCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const range = resolveTableRange(accessor, params.range);
+    if (!range) return false;
+    const found = getDocAndTable(accessor, range.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const { start, end, top, bottom } = params.margin;
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+    setProperty(jsonX, rawActions, ["tableSource", range.tableId, "cellMargin"], table.cellMargin, {
+      start: { v: start },
+      end: { v: end },
+      top: { v: top },
+      bottom: { v: bottom },
+    });
+
+    // Per-cell overrides would win over the table default, so Univer's own
+    // per-cell margins (written when a table is created) are cleared too.
+    table.tableRows.forEach((row, r) => {
+      row.tableCells.forEach((cell, c) => {
+        if (!cell.margin) return;
+        setProperty(
+          jsonX,
+          rawActions,
+          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "margin"],
+          cell.margin,
+          undefined,
+        );
+      });
+    });
+
+    if (!runMutation(accessor, docDataModel, rawActions)) return false;
+    forceRelayout(accessor, docDataModel.getUnitId());
+    return true;
   },
 };
 
@@ -1104,6 +1192,7 @@ export const SetTableFitToWindowCommand: ICommand<ISetTableFitToWindowParams> = 
 };
 
 export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
+  SetTableCellMarginCommand,
   ResizeTableColumnCommand,
   ResizeTableRowCommand,
   SetTableCellBackgroundCommand,

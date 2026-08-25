@@ -8,7 +8,8 @@ import {
 } from "@univerjs/core";
 import type { DocumentDataModel, IDisposable, Injector, ITableCellMargin } from "@univerjs/core";
 import { DocEventManagerService } from "@univerjs/docs-ui";
-import { CURSOR_TYPE, IRenderManagerService } from "@univerjs/engine-render";
+import { CURSOR_TYPE, getTableIdAndSliceIndex, IRenderManagerService } from "@univerjs/engine-render";
+import { DocSkeletonManagerService } from "@univerjs/docs";
 import { ResizeTableColumnCommandId, ResizeTableRowCommandId } from "./table-style-commands";
 
 // Word lets you drag a table's borders with the mouse. Univer's open-source
@@ -29,9 +30,30 @@ const DEFAULT_CELL_MARGIN = { start: 10, end: 10, top: 5, bottom: 5 };
  */
 interface TableCellBound {
   rect: { left: number; right: number; top: number; bottom: number };
+  pageIndex: number;
   rowIndex: number;
   colIndex: number;
   tableId: string;
+}
+
+/** Just enough of the skeleton to map a slice's row back to the table's. */
+type SkeletonLike = {
+  getSkeletonData: () => { pages?: { skeTables?: Map<string, { rows: { index: number }[] }> }[] } | undefined | null;
+};
+
+/**
+ * A table that spills onto another page is laid out as several skeleton
+ * "slices" — `${tableId}#-#0`, `#-#1`, ... — and each slice numbers its
+ * rows from zero again. Hover events report those slice coordinates, while
+ * every table command addresses the source table, so the two are reconciled
+ * here: the slice's id gives the table, and the slice's own row skeleton
+ * carries the row's real index within it.
+ */
+function toSourceCell(cell: TableCellBound, skeleton: SkeletonLike | undefined): TableCellBound {
+  const { tableId } = getTableIdAndSliceIndex(cell.tableId);
+  if (tableId === cell.tableId) return cell;
+  const rows = skeleton?.getSkeletonData()?.pages?.[cell.pageIndex]?.skeTables?.get(cell.tableId)?.rows;
+  return { ...cell, tableId, rowIndex: rows?.[cell.rowIndex]?.index ?? cell.rowIndex };
 }
 
 type ResizeTarget =
@@ -198,8 +220,9 @@ function attachTableResize(
   // The service reports no cell while the pointer sits in the padding
   // between two cells - which is exactly where a border is - so the last
   // cell is kept until the pointer moves clear of it (see resolveTarget).
+  const skeletonManagerService = render.with(DocSkeletonManagerService);
   const hoverSubscription = eventManager.hoverTableCellRealTime$.subscribe((cell) => {
-    if (cell) hoveredCell = cell;
+    if (cell) hoveredCell = toSourceCell(cell, skeletonManagerService?.getSkeleton() as SkeletonLike | undefined);
   });
 
   const pointerMove = scene.onPointerMove$.subscribeEvent((event) => {

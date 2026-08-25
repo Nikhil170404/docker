@@ -35,6 +35,8 @@ import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
 import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
 import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
+import { disableSlashMenu } from "@/lib/univer/slash-key";
+import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
@@ -101,6 +103,9 @@ export default function DocsEditor({
   useEffect(() => {
     if (!containerRef.current || disposedRef.current) return;
     disposedRef.current = true;
+
+    // Word types "/" as a character; Univer's block menu steals the key.
+    disableSlashMenu();
 
     const { univer, univerAPI } = createUniver({
       theme: WORD_THEME,
@@ -239,6 +244,7 @@ export default function DocsEditor({
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
     const pageChrome = hidePageMarginMarks(injector, fDoc.getId());
+    const dialogFocus = restoreFocusAfterDialogs(injector, fDoc.getId());
 
     const renderManagerService = injector.get(IRenderManagerService);
     const docSelectionManagerService = injector.get(DocSelectionManagerService);
@@ -299,14 +305,15 @@ export default function DocsEditor({
     // pointer-driven moves, so the selection operation Univer's own toolbar
     // items listen to drives this too.
     const isCursorInsideTable = (): boolean | null => {
-      if (resolveLiveTableRange(docSelectionManagerService)) return true;
+      const docDataModel = univerInstanceService.getCurrentUnitOfType<DocumentDataModel>(
+        UniverInstanceType.UNIVER_DOC,
+      );
+      if (resolveLiveTableRange(docSelectionManagerService, docDataModel)) return true;
       const offset = docSelectionManagerService.getActiveTextRange()?.startOffset;
       // No selection at all says nothing about where the user is (a table
       // mutation clears it), so the tab keeps whatever state it had.
       if (offset == null) return null;
-      const tables = univerInstanceService
-        .getCurrentUnitOfType<DocumentDataModel>(UniverInstanceType.UNIVER_DOC)
-        ?.getBody()?.tables;
+      const tables = docDataModel?.getBody()?.tables;
       return Boolean(tables?.some((table) => offset > table.startIndex && offset < table.endIndex));
     };
     const refreshTableContext = () => {
@@ -345,6 +352,7 @@ export default function DocsEditor({
       rulerPart.dispose();
       tableResize.dispose();
       pageChrome.dispose();
+      dialogFocus.dispose();
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
       clearTimeout(statusTimeout);

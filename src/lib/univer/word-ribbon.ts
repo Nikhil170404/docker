@@ -19,6 +19,11 @@ import TableGridPicker, { parseTableSize } from "@/components/editors/TableGridP
 import TableSizeField from "@/components/editors/TableSizeField";
 import { whenDocAndEditorFocused } from "@univerjs/docs-ui";
 import {
+  DocSelectAllCommand,
+  AlignCenterCommand,
+  AlignJustifyCommand,
+  AlignLeftCommand,
+  AlignRightCommand,
   CreateDocTableCommand,
   DocCreateTableOperation,
   DocTableDeleteColumnsCommand,
@@ -79,6 +84,7 @@ import {
   SetTableBandedRowsCommandId,
   SetTableCellAlignCommandId,
   SetTableCellBackgroundCommandId,
+  SetTableCellMarginCommandId,
   SetTableCellBorderCommandId,
   SetTableColumnWidthCommandId,
   SetTableFitToWindowCommandId,
@@ -157,6 +163,9 @@ export const WORD_UI_LOCALE = {
     },
   },
   dockaro: {
+    editing: {
+      selectAll: "Select all",
+    },
     file: {
       export: "Export",
       exportWord: "Word document (.docx)",
@@ -222,6 +231,11 @@ export const WORD_UI_LOCALE = {
       bandedRows: "Banded rows",
       bandedGrey: "Banded - grey",
       bandedBlue: "Banded - blue",
+      bandedPurple: "Banded - purple",
+      cellMargins: "Cell margins",
+      cellMarginsNormal: "Normal",
+      cellMarginsNarrow: "Narrow",
+      cellMarginsNone: "None",
       off: "Off",
       align: "Cell alignment",
       rowHeight: "Row height",
@@ -717,6 +731,11 @@ function buildRootMenuOverrides(): MenuSchemaType {
                     colorOdd: "#DEEAF6",
                     colorEven: "#FFFFFF",
                   }),
+                  option("dockaro.table.bandedPurple", {
+                    enabled: true,
+                    colorOdd: "#F2EEFC",
+                    colorEven: "#FFFFFF",
+                  }),
                   option("dockaro.table.off", { enabled: false }),
                 ],
               }),
@@ -878,6 +897,27 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 title: "dockaro.table.split",
               }),
           },
+          [SetTableCellMarginCommandId]: {
+            order: 6,
+            gridLayout: { row: 1, column: 7, rowSpan: 2, showLabel: true },
+            menuItemFactory: (accessor: IAccessor) =>
+              selector(accessor, {
+                id: SetTableCellMarginCommandId,
+                icon: "ShapeFrameIcon",
+                title: "dockaro.table.cellMargins",
+                selections: [
+                  option("dockaro.table.cellMarginsNormal", {
+                    margin: { start: 10, end: 10, top: 5, bottom: 5 },
+                  }),
+                  option("dockaro.table.cellMarginsNarrow", {
+                    margin: { start: 6, end: 6, top: 1, bottom: 1 },
+                  }),
+                  option("dockaro.table.cellMarginsNone", {
+                    margin: { start: 0, end: 0, top: 0, bottom: 0 },
+                  }),
+                ],
+              }),
+          },
           [SetTableLayoutCommandId]: {
             order: 3,
             gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
@@ -981,16 +1021,41 @@ export function installWordRibbon(injector: Injector): WordRibbon {
   const ribbonService = injector.get(IRibbonService);
 
   const iconDisposable = iconManager.register(WORD_ICONS);
-  // Word's Ctrl+Enter inserts a page break; Univer binds nothing to it.
-  const shortcutDisposable = injector.get(IShortcutService).registerShortcut({
-    id: InsertPageBreakCommandId,
-    binding: KeyCode.ENTER | MetaKeys.CTRL_COMMAND,
-    preconditions: whenDocAndEditorFocused,
-    description: "dockaro.layout.pageBreak",
-    // Univer's shortcut panel throws if a group has no title of its own.
-    group: "10_global-shortcut",
-    groupTitle: "ui.global-shortcut",
-  });
+  const shortcutService = injector.get(IShortcutService);
+  // Univer's shortcut panel throws if a group has no title of its own.
+  const wordShortcut = (
+    id: string,
+    binding: number,
+    description: string,
+    extra?: { staticParameters?: object; priority?: number },
+  ) =>
+    shortcutService.registerShortcut({
+      id,
+      binding,
+      preconditions: whenDocAndEditorFocused,
+      description,
+      group: "10_global-shortcut",
+      groupTitle: "ui.global-shortcut",
+      ...extra,
+    });
+  const shortcutDisposables = [
+    // Word's Ctrl+Enter inserts a page break; Univer binds nothing to it.
+    wordShortcut(InsertPageBreakCommandId, KeyCode.ENTER | MetaKeys.CTRL_COMMAND, "dockaro.layout.pageBreak"),
+    // Univer binds alignment to Google Docs' Ctrl+Shift+L/E/R/J. Word's are
+    // Ctrl+L/E/R/J, so those are added alongside — Univer's keep working.
+    wordShortcut(AlignLeftCommand.id, KeyCode.L | MetaKeys.CTRL_COMMAND, "toolbar.alignLeft"),
+    wordShortcut(AlignCenterCommand.id, KeyCode.E | MetaKeys.CTRL_COMMAND, "toolbar.alignCenter"),
+    wordShortcut(AlignRightCommand.id, KeyCode.R | MetaKeys.CTRL_COMMAND, "toolbar.alignRight"),
+    wordShortcut(AlignJustifyCommand.id, KeyCode.J | MetaKeys.CTRL_COMMAND, "toolbar.alignJustify"),
+    // Univer's Ctrl+A widens the selection a step at a time (Google Docs:
+    // sentence, paragraph, then document). Word selects the whole document
+    // on the first press, so this takes the binding over — higher priority
+    // wins when two shortcuts share one.
+    wordShortcut(DocSelectAllCommand.id, KeyCode.A | MetaKeys.CTRL_COMMAND, "dockaro.editing.selectAll", {
+      staticParameters: { wholeDocument: true },
+      priority: 100,
+    }),
+  ];
   const componentDisposable = componentManager.register(TABLE_GRID_PICKER_COMPONENT, TableGridPicker);
   const sizeFieldDisposable = componentManager.register(TABLE_SIZE_FIELD_COMPONENT, TableSizeField);
   menuManagerService.appendRootMenu(buildRootMenuOverrides());
@@ -1011,7 +1076,7 @@ export function installWordRibbon(injector: Injector): WordRibbon {
       ribbonService.hideAllContextualTabs();
       componentDisposable.dispose();
       sizeFieldDisposable.dispose();
-      shortcutDisposable.dispose();
+      for (const disposable of shortcutDisposables) disposable.dispose();
       iconDisposable.dispose();
     },
   };
