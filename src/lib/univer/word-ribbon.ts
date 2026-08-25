@@ -79,6 +79,7 @@ import {
   PX_PER_INCH,
 } from "./word-commands";
 import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
+import { ToggleSpellCheckCommandId } from "./spell-check";
 import {
   InsertCoverPageCommandId,
   InsertTableOfContentsCommandId,
@@ -223,6 +224,9 @@ export const WORD_UI_LOCALE = {
       indentDecrease: "Decrease indent",
     },
     review: {
+      spelling: "Spelling",
+      spellingOn: "Check spelling",
+      spellingOff: "Off",
       newComment: "New comment",
       comments: "Comments",
     },
@@ -743,6 +747,20 @@ function buildWordMenuSchema(): MenuSchemaType {
     },
 
     [WORD_GROUP.REVIEW_COMMENTS]: {
+      [ToggleSpellCheckCommandId]: {
+        order: -1,
+        gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: ToggleSpellCheckCommandId,
+            icon: "FontColorDoubleIcon",
+            title: "dockaro.review.spelling",
+            selections: [
+              option("dockaro.review.spellingOn", { enabled: true }),
+              option("dockaro.review.spellingOff", { enabled: false }),
+            ],
+          }),
+      },
       "dockaro.menu.new-comment": {
         order: 0,
         gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
