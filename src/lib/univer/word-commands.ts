@@ -175,7 +175,9 @@ export interface IExportDocumentParams {
 export interface ISetPageMarginsParams {
   /** One of Word's Margins presets. */
   preset?: MarginPreset;
-  /** Explicit margins in document pixels, as dragged on the ruler. */
+  /** Explicit margins in document pixels, as dragged on the rulers. */
+  marginTop?: number;
+  marginBottom?: number;
   marginLeft?: number;
   marginRight?: number;
 }
@@ -335,6 +337,8 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
       if (!params) return false;
       if (!params.preset) {
         const patch: Parameters<typeof applyPageSetup>[1] = {};
+        if (params.marginTop !== undefined) patch.marginTop = Math.max(0, params.marginTop);
+        if (params.marginBottom !== undefined) patch.marginBottom = Math.max(0, params.marginBottom);
         if (params.marginLeft !== undefined) patch.marginLeft = Math.max(0, params.marginLeft);
         if (params.marginRight !== undefined) patch.marginRight = Math.max(0, params.marginRight);
         if (Object.keys(patch).length === 0) return false;

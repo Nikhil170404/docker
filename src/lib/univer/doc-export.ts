@@ -1,4 +1,4 @@
-import type { IDocumentBody, IDocumentData, IParagraph, ITextRun } from "@univerjs/core";
+import type { IDocumentBody, IDocumentData, IParagraph, IReferenceSource, ITextRun } from "@univerjs/core";
 import { NAMED_STYLE_MAP } from "@univerjs/core";
 import { convertBodyToHtml } from "@univerjs/docs-ui";
 import { DOCX_MIME_TYPE, buildDocxBlob } from "./docx/package";
@@ -124,6 +124,51 @@ function buildHtmlBody(snapshot: IDocumentData): string {
   return injectColumnWidths(convertBodyToHtml(patched), snapshot);
 }
 
+/** The first header/footer defined, which is the document's default one. */
+function firstSegment<T>(map: Record<string, T> | undefined): T | undefined {
+  const values = Object.values(map ?? {});
+  return values.length ? values[0] : undefined;
+}
+
+/**
+ * A header or footer converted on its own. It is a full document body in
+ * its own right - it can hold tables and drawings - so it goes through the
+ * same conversion as the main body, against its own reference source.
+ */
+function buildSegmentHtml(snapshot: IDocumentData, segment: IReferenceSource & { body: IDocumentBody }): string {
+  return buildHtmlBody({ ...snapshot, ...segment } as IDocumentData);
+}
+
+/**
+ * Wraps the document so its header and footer repeat on every printed page.
+ * A table's thead and tfoot are the one construct browsers reliably repeat
+ * across page breaks - Chrome ignores CSS `@page` margin boxes, which is
+ * how Word itself would place them - so a header and footer set in the
+ * editor now survive into PDF and print instead of being dropped.
+ */
+function withRunningHeaderFooter(snapshot: IDocumentData, content: string): string {
+  const header = firstSegment(snapshot.headers);
+  const footer = firstSegment(snapshot.footers);
+  if (!header && !footer) return content;
+
+  const headerRow = header
+    ? `<thead><tr><td><div class="RunningHeader">${buildSegmentHtml(snapshot, header)}</div></td></tr></thead>`
+    : "";
+  const footerRow = footer
+    ? `<tfoot><tr><td><div class="RunningFooter">${buildSegmentHtml(snapshot, footer)}</div></td></tr></tfoot>`
+    : "";
+  return `<table class="PageLayout">${headerRow}${footerRow}<tbody><tr><td>${content}</td></tr></tbody></table>`;
+}
+
+/** Styling for the running header and footer rows. */
+const RUNNING_HEADER_CSS = `
+  table.PageLayout { width: 100%; border-collapse: collapse; }
+  table.PageLayout > thead > tr > td,
+  table.PageLayout > tbody > tr > td,
+  table.PageLayout > tfoot > tr > td { padding: 0; border: none; }
+  .RunningHeader { padding-bottom: 8px; }
+  .RunningFooter { padding-top: 8px; }`;
+
 function buildPageCss(snapshot: IDocumentData) {
   const style = snapshot.documentStyle;
   const width = pxToIn(style?.pageSize?.width ?? undefined, 8.27 * PX_PER_INCH);
@@ -151,7 +196,7 @@ function downloadBlob(content: string | Blob, mime: string, filename: string) {
 // (Word opens .html natively), no MS-specific markup.
 export function exportAsHtml(snapshot: IDocumentData) {
   const title = getDocTitle(snapshot);
-  const body = buildHtmlBody(snapshot);
+  const body = withRunningHeaderFooter(snapshot, buildHtmlBody(snapshot));
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -161,7 +206,7 @@ export function exportAsHtml(snapshot: IDocumentData) {
   body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; max-width: 800px; margin: 40px auto; }
   p.UniverNormal, p.UniverHeading { margin: 0; }
   table.UniverTable { border-collapse: collapse; }
-  table.UniverTable td.UniverTableCell { border: 1px solid #ccc; padding: 4px 8px; }
+  table.UniverTable td.UniverTableCell { border: 1px solid #ccc; padding: 4px 8px; }${RUNNING_HEADER_CSS}
 </style>
 </head>
 <body>
@@ -189,7 +234,7 @@ export async function exportAsWord(snapshot: IDocumentData) {
 // dialog, which every major browser supports without any library.
 export function exportAsPdf(snapshot: IDocumentData) {
   const title = getDocTitle(snapshot);
-  const body = buildHtmlBody(snapshot);
+  const body = withRunningHeaderFooter(snapshot, buildHtmlBody(snapshot));
   const { width, height, marginTop, marginBottom, marginLeft, marginRight } = buildPageCss(snapshot);
   const html = `<!DOCTYPE html>
 <html>
@@ -204,7 +249,7 @@ export function exportAsPdf(snapshot: IDocumentData) {
   body { font-family: Arial, Helvetica, sans-serif; color: #1b1c1f; margin: 0; }
   p.UniverNormal, p.UniverHeading { margin: 0; }
   table.UniverTable { border-collapse: collapse; }
-  table.UniverTable td.UniverTableCell { border: 1px solid #999; padding: 4px 8px; }
+  table.UniverTable td.UniverTableCell { border: 1px solid #999; padding: 4px 8px; }${RUNNING_HEADER_CSS}
 </style>
 </head>
 <body>

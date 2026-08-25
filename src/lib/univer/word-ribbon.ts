@@ -5,14 +5,19 @@ import {
   ComponentManager,
   IMenuManagerService,
   IRibbonService,
+  IShortcutService,
   IconManager,
+  KeyCode,
   MenuItemType,
+  MetaKeys,
   RibbonInsertGroup,
   RibbonStartGroup,
   getMenuHiddenObservable,
 } from "@univerjs/ui";
 import type { IMenuButtonItem, IMenuSelectorItem, IValueOption, MenuSchemaType } from "@univerjs/ui";
 import TableGridPicker, { parseTableSize } from "@/components/editors/TableGridPicker";
+import TableSizeField from "@/components/editors/TableSizeField";
+import { whenDocAndEditorFocused } from "@univerjs/docs-ui";
 import {
   CreateDocTableCommand,
   DocCreateTableOperation,
@@ -118,6 +123,8 @@ const WORD_GROUP = {
 
 /** Registered component id for the Word-style table size grid. */
 const TABLE_GRID_PICKER_COMPONENT = "dockaro.component.table-grid-picker";
+/** Registered component id for Word's row height / column width box. */
+const TABLE_SIZE_FIELD_COMPONENT = "dockaro.component.table-size-field";
 
 const COMMENT_PANEL_COMMAND_ID = "docs.operation.toggle-comment-panel";
 const ADD_COMMENT_COMMAND_ID = "docs.operation.start-add-comment";
@@ -815,6 +822,15 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 icon: "AutoHeightDoubleIcon",
                 title: "dockaro.table.rowHeight",
                 selections: [
+                  {
+                    label: {
+                      name: TABLE_SIZE_FIELD_COMPONENT,
+                      hoverable: false,
+                      selectable: false,
+                      props: { title: "Height" },
+                    },
+                    params: (value?: string | number) => ({ mode: "fixed", height: Number(value) }),
+                  },
                   option("dockaro.table.autoFit", { mode: "auto" }),
                   ...ROW_HEIGHTS.map((height) => option(`${height} px`, { mode: "fixed", height })),
                 ],
@@ -828,7 +844,18 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 id: SetTableColumnWidthCommandId,
                 icon: "AdjustWidthDoubleIcon",
                 title: "dockaro.table.columnWidth",
-                selections: COLUMN_WIDTHS.map((width) => option(`${width} px`, { width })),
+                selections: [
+                  {
+                    label: {
+                      name: TABLE_SIZE_FIELD_COMPONENT,
+                      hoverable: false,
+                      selectable: false,
+                      props: { title: "Width" },
+                    },
+                    params: (value?: string | number) => ({ width: Number(value) }),
+                  },
+                  ...COLUMN_WIDTHS.map((width) => option(`${width} px`, { width })),
+                ],
               }),
           },
           [MergeTableCellsCommandId]: {
@@ -954,7 +981,18 @@ export function installWordRibbon(injector: Injector): WordRibbon {
   const ribbonService = injector.get(IRibbonService);
 
   const iconDisposable = iconManager.register(WORD_ICONS);
+  // Word's Ctrl+Enter inserts a page break; Univer binds nothing to it.
+  const shortcutDisposable = injector.get(IShortcutService).registerShortcut({
+    id: InsertPageBreakCommandId,
+    binding: KeyCode.ENTER | MetaKeys.CTRL_COMMAND,
+    preconditions: whenDocAndEditorFocused,
+    description: "dockaro.layout.pageBreak",
+    // Univer's shortcut panel throws if a group has no title of its own.
+    group: "10_global-shortcut",
+    groupTitle: "ui.global-shortcut",
+  });
   const componentDisposable = componentManager.register(TABLE_GRID_PICKER_COMPONENT, TableGridPicker);
+  const sizeFieldDisposable = componentManager.register(TABLE_SIZE_FIELD_COMPONENT, TableSizeField);
   menuManagerService.appendRootMenu(buildRootMenuOverrides());
   menuManagerService.mergeMenu(buildWordMenuSchema());
 
@@ -972,6 +1010,8 @@ export function installWordRibbon(injector: Injector): WordRibbon {
     dispose: () => {
       ribbonService.hideAllContextualTabs();
       componentDisposable.dispose();
+      sizeFieldDisposable.dispose();
+      shortcutDisposable.dispose();
       iconDisposable.dispose();
     },
   };

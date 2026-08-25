@@ -30,6 +30,7 @@ import {
   SetZoomCommandId,
 } from "@/lib/univer/word-commands";
 import WordRuler, { type RulerGeometry } from "./WordRuler";
+import WordVerticalRuler from "./WordVerticalRuler";
 import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
 import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
@@ -89,7 +90,7 @@ export default function DocsEditor({
   const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
   const documentNameRef = useRef<(name: string) => void>(() => {});
   const statusListenerRef = useRef(onStatusChange);
-  const [, setReady] = useState(false);
+  const [ready, setReady] = useState(false);
 
   // The editor is created once; the callback identity may change on every
   // parent render, so it is read through a ref rather than re-running setup.
@@ -206,7 +207,7 @@ export default function DocsEditor({
       const canvas = container?.querySelector("canvas");
       if (!container || !renderUnit || !canvas) return null;
 
-      const documents = renderUnit.mainComponent as unknown as { left: number } | undefined;
+      const documents = renderUnit.mainComponent as unknown as { left: number; top: number } | undefined;
       const scene = renderUnit.scene;
       const scale = scene.getAncestorScale().scaleX || 1;
       const scrollX = scene.getViewport("viewMain")?.viewportScrollX ?? 0;
@@ -217,11 +218,18 @@ export default function DocsEditor({
       if (!documents || !style?.pageSize?.width) return null;
 
       const paragraphStyle = currentParagraphStyle(docModel);
+      const canvasRect = canvas.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const scrollY = scene.getViewport("viewMain")?.viewportScrollY ?? 0;
       return {
         pageLeft: canvasOffset + (documents.left - scrollX) * scale,
+        pageTop: canvasRect.top - containerRect.top + (documents.top - scrollY) * scale,
         pageWidth: style.pageSize.width * scale,
+        pageHeight: (style.pageSize.height ?? 1123) * scale,
         marginLeft: style.marginLeft ?? 72,
         marginRight: style.marginRight ?? 72,
+        marginTop: style.marginTop ?? 72,
+        marginBottom: style.marginBottom ?? 72,
         indentStart: paragraphStyle?.indentStart?.v ?? 0,
         indentEnd: paragraphStyle?.indentEnd?.v ?? 0,
         indentFirstLine: paragraphStyle?.indentFirstLine?.v ?? 0,
@@ -401,5 +409,16 @@ export default function DocsEditor({
     },
   }));
 
-  return <div ref={containerRef} className="relative h-full min-h-0 w-full flex-1" />;
+  return (
+    <div ref={containerRef} className="relative h-full min-h-0 w-full flex-1">
+      {ready && (
+        <WordVerticalRuler
+          getGeometry={() => rulerGeometryRef.current()}
+          onMarginChange={(margins) => {
+            void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
+          }}
+        />
+      )}
+    </div>
+  );
 }
