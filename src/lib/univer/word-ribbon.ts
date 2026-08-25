@@ -80,6 +80,14 @@ import {
 } from "./word-commands";
 import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
 import {
+  InsertCoverPageCommandId,
+  InsertTableOfContentsCommandId,
+  SetColumnsCommandId,
+  SetHeaderFooterOptionsCommandId,
+  SetParagraphBorderCommandId,
+  SetParagraphShadingCommandId,
+} from "./word-features";
+import {
   MergeTableCellsCommandId,
   SetTableBandedRowsCommandId,
   SetTableCellAlignCommandId,
@@ -175,6 +183,18 @@ export const WORD_UI_LOCALE = {
       pageSetup: "Page setup",
     },
     layout: {
+      columns: "Columns",
+      columnsOne: "One",
+      columnsTwo: "Two",
+      columnsThree: "Three",
+      columnsLeft: "Left",
+      columnsRight: "Right",
+      columnsLine: "Two with line between",
+      headerFooterOptions: "Header options",
+      differentFirstPage: "Different first page",
+      sameFirstPage: "Same first page",
+      differentOddEven: "Different odd & even pages",
+      sameOddEven: "Same odd & even pages",
       margins: "Margins",
       marginsNormal: "Normal (1 inch)",
       marginsNarrow: "Narrow (0.5 inch)",
@@ -192,6 +212,12 @@ export const WORD_UI_LOCALE = {
       spaceNone: "None",
     },
     paragraph: {
+      shading: "Shading",
+      borderBottom: "Bottom border",
+      borderThin: "Thin line",
+      borderThick: "Thick line",
+      borderDashed: "Dashed line",
+      borderNone: "No line",
       lineSpacing: "Line spacing",
       indentIncrease: "Increase indent",
       indentDecrease: "Decrease indent",
@@ -204,6 +230,13 @@ export const WORD_UI_LOCALE = {
       zoom: "Zoom",
     },
     insert: {
+      coverPage: "Cover page",
+      coverPlain: "Plain",
+      coverBanded: "Banded",
+      tableOfContents: "Contents",
+      tocOneLevel: "Headings 1",
+      tocThreeLevels: "Headings 1-3",
+      tocFiveLevels: "Headings 1-5",
       table: "Table",
       tableDialog: "Insert table...",
     },
@@ -440,6 +473,44 @@ function buildWordMenuSchema(): MenuSchemaType {
             params: { direction: "decrease" },
           }),
       },
+      [SetParagraphShadingCommandId]: {
+        order: 30,
+        gridLayout: { row: 1, column: 5 },
+        menuItemFactory: (accessor: IAccessor): IMenuSelectorItem => ({
+          id: SetParagraphShadingCommandId,
+          type: MenuItemType.SUBITEMS,
+          icon: "PaintBucketDoubleIcon",
+          title: "dockaro.paragraph.shading",
+          tooltip: "dockaro.paragraph.shading",
+          selections: [
+            {
+              label: { name: COLOR_PICKER_COMPONENT, hoverable: false, selectable: false },
+              params: (value?: string | number) => ({ color: value }),
+            },
+          ],
+          hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
+        }),
+      },
+      [SetParagraphBorderCommandId]: {
+        order: 31,
+        gridLayout: { row: 2, column: 5 },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetParagraphBorderCommandId,
+            icon: "DownBorderDoubleIcon",
+            title: "dockaro.paragraph.borderBottom",
+            selections: [
+              option("dockaro.paragraph.borderThin", { enabled: true, width: 1 }),
+              option("dockaro.paragraph.borderThick", { enabled: true, width: 2 }),
+              option("dockaro.paragraph.borderDashed", {
+                enabled: true,
+                width: 1,
+                dashStyle: DashStyleType.DASH,
+              }),
+              option("dockaro.paragraph.borderNone", { enabled: false }),
+            ],
+          }),
+      },
       [SetLineSpacingCommandId]: {
         order: 22,
         gridLayout: { row: 1, column: 4, rowSpan: 2 },
@@ -487,6 +558,35 @@ function buildWordMenuSchema(): MenuSchemaType {
             id: InsertPageBreakCommandId,
             icon: "DocsMultiIcon",
             title: "dockaro.layout.pageBreak",
+          }),
+      },
+      [InsertCoverPageCommandId]: {
+        order: 8,
+        gridLayout: { row: 1, column: 8, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: InsertCoverPageCommandId,
+            icon: "ShapeRectIcon",
+            title: "dockaro.insert.coverPage",
+            selections: [
+              option("dockaro.insert.coverPlain", { design: "plain" }),
+              option("dockaro.insert.coverBanded", { design: "banded" }),
+            ],
+          }),
+      },
+      [InsertTableOfContentsCommandId]: {
+        order: 9,
+        gridLayout: { row: 1, column: 9, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: InsertTableOfContentsCommandId,
+            icon: "OrderIcon",
+            title: "dockaro.insert.tableOfContents",
+            selections: [
+              option("dockaro.insert.tocThreeLevels", { levels: 3 }),
+              option("dockaro.insert.tocOneLevel", { levels: 1 }),
+              option("dockaro.insert.tocFiveLevels", { levels: 5 }),
+            ],
           }),
       },
       [InsertBlankPageCommandId]: {
@@ -570,6 +670,40 @@ function buildWordMenuSchema(): MenuSchemaType {
             commandId: EditHeaderFooterCommandId,
             icon: "HeaderFooterIcon",
             title: "dockaro.layout.headerFooter",
+          }),
+      },
+      [SetColumnsCommandId]: {
+        order: 5,
+        gridLayout: { row: 1, column: 6, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetColumnsCommandId,
+            icon: "ShrinkToFitIcon",
+            title: "dockaro.layout.columns",
+            selections: [
+              option("dockaro.layout.columnsOne", { count: 1 }),
+              option("dockaro.layout.columnsTwo", { count: 2 }),
+              option("dockaro.layout.columnsThree", { count: 3 }),
+              option("dockaro.layout.columnsLeft", { count: 2, weights: [1, 2] }),
+              option("dockaro.layout.columnsRight", { count: 2, weights: [2, 1] }),
+              option("dockaro.layout.columnsLine", { count: 2, separator: true }),
+            ],
+          }),
+      },
+      [SetHeaderFooterOptionsCommandId]: {
+        order: 6,
+        gridLayout: { row: 1, column: 7, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetHeaderFooterOptionsCommandId,
+            icon: "HeaderFooterIcon",
+            title: "dockaro.layout.headerFooterOptions",
+            selections: [
+              option("dockaro.layout.differentFirstPage", { useFirstPage: true }),
+              option("dockaro.layout.sameFirstPage", { useFirstPage: false }),
+              option("dockaro.layout.differentOddEven", { oddEven: true }),
+              option("dockaro.layout.sameOddEven", { oddEven: false }),
+            ],
           }),
       },
     },

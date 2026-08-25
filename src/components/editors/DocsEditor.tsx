@@ -37,6 +37,7 @@ import { createTableResizeInteraction } from "@/lib/univer/table-resize";
 import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
 import { disableSlashMenu } from "@/lib/univer/slash-key";
 import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
+import { createWordFeatureCommands } from "@/lib/univer/word-features";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
@@ -177,6 +178,7 @@ export default function DocsEditor({
       SetBorderPenCommand,
       ...ALL_TABLE_STYLE_COMMANDS,
       ...createWordCommands({ doc: fDoc, getContainer: () => containerRef.current }),
+      ...createWordFeatureCommands(fDoc),
     ].map((command) => commandService.registerCommand(command));
     commandServiceRef.current = commandService;
     documentNameRef.current = (name: string) => {
