@@ -33,6 +33,7 @@ import WordRuler, { type RulerGeometry } from "./WordRuler";
 import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
 import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
+import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
@@ -229,6 +230,7 @@ export default function DocsEditor({
     };
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
+    const pageChrome = hidePageMarginMarks(injector, fDoc.getId());
 
     const renderManagerService = injector.get(IRenderManagerService);
     const docSelectionManagerService = injector.get(DocSelectionManagerService);
@@ -334,6 +336,7 @@ export default function DocsEditor({
       wordRibbon.dispose();
       rulerPart.dispose();
       tableResize.dispose();
+      pageChrome.dispose();
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
       clearTimeout(statusTimeout);

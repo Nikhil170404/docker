@@ -32,6 +32,7 @@ export const SetLineSpacingCommandId = "dockaro.command.line-spacing";
 export const SetParagraphSpaceCommandId = "dockaro.command.paragraph-space";
 export const SetIndentCommandId = "dockaro.command.indent";
 export const InsertPageBreakCommandId = "dockaro.command.page-break";
+export const InsertBlankPageCommandId = "dockaro.command.blank-page";
 export const EditHeaderFooterCommandId = "dockaro.command.header-footer";
 export const ExportDocumentCommandId = "dockaro.command.export";
 export const SetPageMarginsCommandId = "dockaro.command.page-margins";
@@ -274,6 +275,25 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     },
   };
 
+  const insertBlankPage: ICommand = {
+    id: InsertBlankPageCommandId,
+    type: CommandType.COMMAND,
+    handler: async (accessor) => {
+      const offset = getCursorOffset(accessor);
+      if (offset == null) return false;
+      // Word's Insert > Blank Page is two page breaks with an empty page
+      // between them: one ends the current page, the other ends the blank
+      // one so the following content keeps its own page.
+      doc.insertColumnBreak(offset);
+      doc.insertColumnBreak(offset + 1);
+      forceRelayout(accessor, doc.getId());
+      // Leave the caret on the blank page, ready to type.
+      doc.setSelection(offset + 1, offset + 1);
+      getContainer()?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
+      return true;
+    },
+  };
+
   const editHeaderFooter: ICommand = {
     id: EditHeaderFooterCommandId,
     type: CommandType.COMMAND,
@@ -412,6 +432,7 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     setParagraphSpace,
     setIndent,
     insertPageBreak,
+    insertBlankPage,
     editHeaderFooter,
     exportDoc,
     setPageMargins,

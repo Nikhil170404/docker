@@ -55,6 +55,7 @@ import {
 import {
   EditHeaderFooterCommandId,
   ExportDocumentCommandId,
+  InsertBlankPageCommandId,
   InsertPageBreakCommandId,
   MARGIN_PRESETS,
   PAGE_SIZE_PRESETS,
@@ -168,6 +169,7 @@ export const WORD_UI_LOCALE = {
       landscape: "Landscape",
       size: "Size",
       pageBreak: "Page break",
+      blankPage: "Blank page",
       headerFooter: "Header & footer",
       spaceBefore: "Space before",
       spaceAfter: "Space after",
@@ -466,9 +468,19 @@ function buildWordMenuSchema(): MenuSchemaType {
             title: "dockaro.layout.pageBreak",
           }),
       },
-      [EditHeaderFooterCommandId]: {
+      [InsertBlankPageCommandId]: {
         order: 11,
         gridLayout: { row: 1, column: 6, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: InsertBlankPageCommandId,
+            icon: "DocsMultiIcon",
+            title: "dockaro.layout.blankPage",
+          }),
+      },
+      [EditHeaderFooterCommandId]: {
+        order: 12,
+        gridLayout: { row: 1, column: 7, rowSpan: 2, showLabel: true },
         menuItemFactory: (accessor: IAccessor) =>
           button(accessor, {
             id: EditHeaderFooterCommandId,
