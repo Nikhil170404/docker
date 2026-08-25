@@ -15,6 +15,7 @@ const columns = [
     links: [
       { href: "/api-docs", label: "API reference" },
       { href: "/#api", label: "Embed guide" },
+      { href: "/compare", label: "vs CKEditor & TinyMCE" },
       { href: "/status", label: "Status" },
     ],
   },

@@ -59,7 +59,7 @@ const faqs = [
   },
   {
     q: "Do you have an API?",
-    a: "Yes. The Business and API plans include a REST API and embeddable editor SDK so you can add Docs, Sheets and Slides to your own product.",
+    a: "Yes, on every developer plan including the free one — a REST API and an embeddable editor SDK for adding Docs, Sheets and Slides to your own product. It is metered by editor load, the same unit CKEditor and TinyMCE bill on, but nothing auto-charges when you go over.",
   },
   {
     q: "How is this cheaper than Microsoft 365?",

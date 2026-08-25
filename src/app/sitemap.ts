@@ -3,7 +3,15 @@ import type { MetadataRoute } from "next";
 const siteUrl = "https://dockaro.com";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const routes = ["", "/pricing", "/api-docs", "/legal/privacy", "/legal/terms", "/status"];
+  const routes = [
+    "",
+    "/pricing",
+    "/compare",
+    "/api-docs",
+    "/legal/privacy",
+    "/legal/terms",
+    "/status",
+  ];
 
   return routes.map((route) => ({
     url: `${siteUrl}${route}`,
