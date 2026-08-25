@@ -61,7 +61,7 @@ export const suitePlans: SuitePlan[] = [
     features: [
       "Docs + Sheets editors",
       "Up to 3 active documents",
-      "Import & export .docx / .xlsx",
+      "Export to .docx / .xlsx / PDF",
       "DocKaro watermark on PDF export",
       "Community support",
     ],
@@ -128,9 +128,9 @@ export const embedPlans: EmbedPlan[] = [
     selfHost: true,
     features: [
       "5,000 editor loads / month",
-      "Full editor — no feature gating",
-      "Self-hosted bundle allowed",
-      "No licence-key banner, ever",
+      "Rich-text AND document mode",
+      "HTML and .docx out of the same embed",
+      "No licence key, no banner, ever",
       "Community support",
     ],
   },
@@ -164,7 +164,7 @@ export const embedPlans: EmbedPlan[] = [
     features: [
       "250,000 editor loads / month",
       "Everything in Starter",
-      "Collaborative editing & comments",
+      "Comments & track changes in the embed",
       "99.9% uptime SLA",
       "Priority support, 4 business hours",
     ],

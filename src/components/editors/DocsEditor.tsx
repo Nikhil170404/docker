@@ -41,9 +41,10 @@ import { createWordFeatureCommands } from "@/lib/univer/word-features";
 import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-check";
 import { createTrackChanges, createTrackChangesCommands } from "@/lib/univer/track-changes";
 import { createWatermarkCommand } from "@/lib/univer/watermark";
-import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
+import { buildWordLocale, deepMergeLocale, WORD_THEME } from "@/lib/univer/word-theme";
+import type { EmbedMode } from "@/lib/embed/protocol";
 
-const STORAGE_KEY = "docs-default";
+const DEFAULT_STORAGE_KEY = "docs-default";
 const AUTOSAVE_DELAY_MS = 600;
 const DEFAULT_DOCUMENT_NAME = "Untitled document";
 const STATUS_REFRESH_DELAY_MS = 400;
@@ -54,6 +55,34 @@ const STATUS_REFRESH_DELAY_MS = 400;
 const DEFAULT_DOCUMENT_STYLE = {
   pageSize: { width: 794, height: 1123 },
   documentFlavor: DocumentFlavor.TRADITIONAL,
+};
+// Rich-text mode is the same engine with the page model switched off:
+// MODERN flavor is Univer's continuous flow, so there are no page bounds,
+// no margins to drag and nothing to paginate — which is exactly the shape
+// a CMS field or comment box wants. Everything else (tables, links, lists,
+// comments, spell check) is identical, because it is the same document.
+const CONTINUOUS_DOCUMENT_STYLE = {
+  documentFlavor: DocumentFlavor.MODERN,
+};
+// Univer's empty-document placeholder advertises a "/" command menu, but
+// disableSlashMenu() turns that key back into a plain character (Word types
+// it). The Word ribbon hides the placeholder anyway; a bare rich-text embed
+// shows it, so it must not promise a menu that will never open.
+const EMPTY_PLACEHOLDER_LOCALE = {
+  "docs-ui": { placeholder: { normalText: "Start typing…" } },
+};
+
+/**
+ * How this editor instance is dressed. Fixed at mount — switching modes
+ * means a new editor, since the flavor is baked into the document.
+ */
+export type DocsEditorOptions = {
+  /** `document` = paginated Word surface. `richtext` = continuous flow. */
+  mode?: EmbedMode;
+  /** localStorage key for the autosaved snapshot. */
+  storageKey?: string;
+  /** Word ribbon + rulers. Off gives Univer's own compact toolbar. */
+  wordChrome?: boolean;
 };
 
 import "@univerjs/preset-docs-core/lib/index.css";
@@ -81,20 +110,34 @@ export type DocsEditorHandle = {
   getRulerGeometry: () => RulerGeometry | null;
   setIndents: (indents: { indentStart?: number; indentEnd?: number; indentFirstLine?: number }) => void;
   setMargins: (margins: { marginLeft?: number; marginRight?: number }) => void;
+  /** The live document, for callers that need to serialise it (the embed bridge). */
+  getSnapshot: () => IDocumentData | null;
 };
 
 export default function DocsEditor({
   apiRef,
   onStatusChange,
+  options,
 }: {
   apiRef?: React.RefObject<DocsEditorHandle | null>;
   onStatusChange?: (status: WordDocumentStatus) => void;
+  options?: DocsEditorOptions;
 }) {
+  // Frozen at mount: the editor is built a single time, and the flavor it
+  // is built with cannot change underneath it. A lazy useState initialiser
+  // (rather than a ref) keeps these readable during render, which the
+  // vertical ruler below needs.
+  const [{ mode, storageKey, wordChrome }] = useState<Required<DocsEditorOptions>>(() => ({
+    mode: options?.mode ?? "document",
+    storageKey: options?.storageKey ?? DEFAULT_STORAGE_KEY,
+    wordChrome: options?.wordChrome ?? (options?.mode ?? "document") === "document",
+  }));
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
   const commandServiceRef = useRef<ICommandService | null>(null);
   const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
   const documentNameRef = useRef<(name: string) => void>(() => {});
+  const snapshotRef = useRef<() => IDocumentData | null>(() => null);
   const statusListenerRef = useRef(onStatusChange);
   const [ready, setReady] = useState(false);
 
@@ -122,18 +165,23 @@ export default function DocsEditor({
             UniverPresetDocsHyperLinkEnUS,
             UniverPresetDocsThreadCommentEnUS,
           ),
-          WORD_UI_LOCALE,
+          wordChrome
+            ? WORD_UI_LOCALE
+            : deepMergeLocale(WORD_UI_LOCALE, EMPTY_PLACEHOLDER_LOCALE),
         ),
       },
       presets: [
         UniverDocsCorePreset({
           container: containerRef.current,
           // Word's ribbon: a tab strip over grouped, two-row controls.
-          ribbonType: "grid",
+          // Rich-text mode wants none of that — Univer's own single-row
+          // toolbar is already the right shape for a field in someone
+          // else's form.
+          ribbonType: wordChrome ? "grid" : "simple",
           // Univer's own footer is replaced by a Word status bar that also
           // reports the page count.
           footer: false,
-          menu: RELOCATED_UNIVER_MENU_ITEMS,
+          ...(wordChrome ? { menu: RELOCATED_UNIVER_MENU_ITEMS } : {}),
         }),
         UniverDocsDrawingPreset(),
         UniverDocsHyperLinkPreset(),
@@ -146,7 +194,7 @@ export default function DocsEditor({
     // (it used to crash at creation time in 0.25.x — see git history), so
     // they'd silently lose pagination/header-footer on load. Backfill it
     // for any saved doc that predates this, without touching its content.
-    let saved = loadSnapshot<Partial<IDocumentData>>(STORAGE_KEY);
+    let saved = loadSnapshot<Partial<IDocumentData>>(storageKey);
 
     // 1.0.0-beta.2 added a strict structural-integrity check that now runs
     // on every edit (table start/end tokens, section IDs, etc.) and throws
@@ -161,15 +209,27 @@ export default function DocsEditor({
       const issues = validateDocumentStructure(saved as Pick<IDocumentData, "body" | "headers" | "footers">);
       if (issues.length > 0) {
         console.warn("[DocKaro] Saved document failed structure validation, starting fresh:", issues);
-        saveSnapshot(`${STORAGE_KEY}.corrupted.${Date.now()}`, saved);
-        clearSnapshot(STORAGE_KEY);
+        saveSnapshot(`${storageKey}.corrupted.${Date.now()}`, saved);
+        clearSnapshot(storageKey);
         saved = null;
       }
     }
 
+    const baseDocumentStyle =
+      mode === "document" ? DEFAULT_DOCUMENT_STYLE : CONTINUOUS_DOCUMENT_STYLE;
     const initialData: Partial<IDocumentData> = saved
-      ? { ...saved, documentStyle: { ...DEFAULT_DOCUMENT_STYLE, ...saved.documentStyle } }
-      : { documentStyle: DEFAULT_DOCUMENT_STYLE };
+      ? { ...saved, documentStyle: { ...baseDocumentStyle, ...saved.documentStyle } }
+      : { documentStyle: baseDocumentStyle };
+    // A snapshot written by a paginated session carries TRADITIONAL flavor
+    // and a page size; letting it win here would hand a rich-text embed
+    // page bounds it has no chrome to control. The mode this editor was
+    // mounted in always decides.
+    if (mode === "richtext" && initialData.documentStyle) {
+      initialData.documentStyle = {
+        ...initialData.documentStyle,
+        ...CONTINUOUS_DOCUMENT_STYLE,
+      };
+    }
     // Word names a new document rather than leaving it blank, and this name
     // is what the title bar shows and what the export is filed under.
     if (!initialData.title) initialData.title = DEFAULT_DOCUMENT_NAME;
@@ -189,13 +249,17 @@ export default function DocsEditor({
       createWatermarkCommand(fDoc),
     ].map((command) => commandService.registerCommand(command));
     commandServiceRef.current = commandService;
+    snapshotRef.current = () => fDoc.save();
     documentNameRef.current = (name: string) => {
       fDoc.setName(name);
-      saveSnapshot(STORAGE_KEY, fDoc.save());
+      saveSnapshot(storageKey, fDoc.save());
       void refreshStatus();
     };
 
-    const wordRibbon = installWordRibbon(injector);
+    // The Word ribbon, rulers and page-margin marks are all page furniture.
+    // Rich-text mode keeps the commands (a table is still a table) but not
+    // the chrome that only makes sense over a paginated canvas.
+    const wordRibbon = wordChrome ? installWordRibbon(injector) : null;
 
     // Word puts its ruler between the ribbon and the page. Univer renders a
     // header slot in exactly that spot, so the ruler goes in as a UI part
@@ -211,7 +275,9 @@ export default function DocsEditor({
         />
       );
     }
-    const rulerPart = injector.get(IUIPartsService).registerComponent(BuiltInUIPart.HEADER, () => DocumentRuler);
+    const rulerPart = wordChrome
+      ? injector.get(IUIPartsService).registerComponent(BuiltInUIPart.HEADER, () => DocumentRuler)
+      : null;
 
     // The ruler needs the page's on-screen position, which is the document
     // component's own offset inside the scene, shifted by the horizontal
@@ -253,7 +319,7 @@ export default function DocsEditor({
     };
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
-    const pageChrome = hidePageMarginMarks(injector, fDoc.getId());
+    const pageChrome = wordChrome ? hidePageMarginMarks(injector, fDoc.getId()) : null;
     const dialogFocus = restoreFocusAfterDialogs(injector, fDoc.getId());
 
     const renderManagerService = injector.get(IRenderManagerService);
@@ -307,7 +373,7 @@ export default function DocsEditor({
     // keystroke, and flush immediately on refresh/close so the last edit
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
-    const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.save());
+    const flushSave = () => saveSnapshot(storageKey, fDoc.save());
     // Word shows its Table Design tab whenever the cursor is inside a
     // table. The caret's offset against the document's own table ranges is
     // the reliable test: the selection's node path is empty right after a
@@ -328,14 +394,14 @@ export default function DocsEditor({
     };
     const refreshTableContext = () => {
       const inside = isCursorInsideTable();
-      if (inside !== null) wordRibbon.setTableContextActive(inside);
+      if (inside !== null) wordRibbon?.setTableContextActive(inside);
     };
 
     const commandSubscription = commandService.onCommandExecuted((command) => {
       // Using a table tool keeps the tab up even though the mutation clears
       // the cell selection it was applied to; the next selection change
       // decides again, exactly as in Word.
-      if (command.id.startsWith("dockaro.command.table-")) wordRibbon.setTableContextActive(true);
+      if (command.id.startsWith("dockaro.command.table-")) wordRibbon?.setTableContextActive(true);
       else if (command.id === SetTextSelectionsOperation.id) refreshTableContext();
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(flushSave, AUTOSAVE_DELAY_MS);
@@ -358,10 +424,10 @@ export default function DocsEditor({
       subscription.unsubscribe();
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
-      wordRibbon.dispose();
-      rulerPart.dispose();
+      wordRibbon?.dispose();
+      rulerPart?.dispose();
       tableResize.dispose();
-      pageChrome.dispose();
+      pageChrome?.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
       trackChanges.dispose();
@@ -410,10 +476,11 @@ export default function DocsEditor({
       disposedRef.current = false;
       commandServiceRef.current = null;
       documentNameRef.current = () => {};
+      snapshotRef.current = () => null;
       rulerGeometryRef.current = () => null;
       setReady(false);
     };
-  }, []);
+  }, [mode, storageKey, wordChrome]);
 
   useImperativeHandle(apiRef, () => ({
     setName: (name: string) => documentNameRef.current(name),
@@ -427,11 +494,12 @@ export default function DocsEditor({
     setMargins: (margins) => {
       void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
     },
+    getSnapshot: () => snapshotRef.current(),
   }));
 
   return (
     <div ref={containerRef} className="relative h-full min-h-0 w-full flex-1">
-      {ready && (
+      {ready && wordChrome && (
         <WordVerticalRuler
           getGeometry={() => rulerGeometryRef.current()}
           onMarginChange={(margins) => {

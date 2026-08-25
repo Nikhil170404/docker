@@ -192,6 +192,25 @@ function downloadBlob(content: string | Blob, mime: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * The document as an HTML fragment, with no surrounding page or <html>
+ * wrapper — what an embedding host gets back from the SDK's `getHTML()`.
+ *
+ * This is the same serialiser the .html and PDF exports run through, so a
+ * fragment pasted into a customer's page and the document they print stay
+ * in agreement. It is deliberately a fragment rather than a document: the
+ * host already has a page, and the whole point of rich-text mode is that
+ * what comes out drops straight into one.
+ */
+export function toHtmlFragment(snapshot: IDocumentData): string {
+  return withRunningHeaderFooter(snapshot, buildHtmlBody(snapshot));
+}
+
+/** The document as a .docx blob, for hosts that want the file rather than markup. */
+export function toDocxBlob(snapshot: IDocumentData): Promise<Blob> {
+  return buildDocxBlob(snapshot, getDocTitle(snapshot));
+}
+
 // A plain, portable HTML file — opens in any browser, editable in Word too
 // (Word opens .html natively), no MS-specific markup.
 export function exportAsHtml(snapshot: IDocumentData) {

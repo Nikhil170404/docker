@@ -14,7 +14,7 @@ const columns = [
     title: "Developers",
     links: [
       { href: "/api-docs", label: "API reference" },
-      { href: "/#api", label: "Embed guide" },
+      { href: "/embed-demo", label: "Embed guide" },
       { href: "/compare", label: "vs CKEditor & TinyMCE" },
       { href: "/status", label: "Status" },
     ],

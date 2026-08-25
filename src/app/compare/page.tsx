@@ -58,7 +58,7 @@ const painPoints = [
     theirs:
       "TinyMCE went LGPL → MIT → GPL 2+ at v7; CKEditor 5 ships GPL 2+ or commercial. Projects built on permissively-licensed dependencies cannot absorb a copyleft dependency, and developers report sales and compliance teams pressing the point.",
     ours:
-      "The embeddable client bundle is MIT. Link it from a proprietary product, a permissively-licensed one, or a GPL one — none of those choices become our licensing conversation.",
+      "The SDK you include is a plain MIT script and the editor itself runs in an iframe, so nothing of ours is ever linked into your build — there is no copyleft question to answer. The engine underneath is Apache-2.0, which is why we can offer self-hosting at all.",
     source: {
       label: "What happened to TinyMCE's license? (#9453)",
       href: "https://github.com/tinymce/tinymce/issues/9453",
@@ -109,10 +109,12 @@ type Cell = boolean | string;
 const matrix: { feature: string; us: Cell; ck: Cell; tiny: Cell }[] = [
   { feature: "Free tier editor loads / month", us: "5,000", ck: "1,000", tiny: "1,000" },
   { feature: "No auto-charged overage", us: true, ck: "$30–$60 / 1k", tiny: "$40 / 1k" },
-  { feature: "Client bundle licence", us: "MIT", ck: "GPL 2+ / commercial", tiny: "GPL 2+ / commercial" },
+  { feature: "SDK licence", us: "MIT (Apache-2.0 engine)", ck: "GPL 2+ / commercial", tiny: "GPL 2+ / commercial" },
   { feature: "Self-host on a published plan", us: true, ck: false, tiny: false },
   { feature: "No licence key to paste into config", us: true, ck: false, tiny: false },
   { feature: "No licence banner shown to end users", us: true, ck: false, tiny: false },
+  { feature: "Rich text AND paginated documents", us: true, ck: false, tiny: false },
+  { feature: "Exports a real .docx", us: true, ck: "Paid add-on", tiny: "Paid add-on" },
   { feature: "All features in every tier", us: true, ck: false, tiny: false },
   { feature: "Buy without a sales call", us: true, ck: "Cloud only", tiny: "Cloud only" },
   { feature: "INR pricing for India", us: true, ck: false, tiny: false },
