@@ -51,6 +51,7 @@ import {
   DownBorderDoubleIcon,
   ExportIcon,
   FlipHorizontalIcon,
+  ImportIcon,
   LeftBorderDoubleIcon,
   NoBorderIcon,
   PrintIcon,
@@ -65,6 +66,7 @@ import {
 import {
   EditHeaderFooterCommandId,
   ExportDocumentCommandId,
+  ImportDocumentCommandId,
   InsertBlankPageCommandId,
   InsertPageBreakCommandId,
   MARGIN_PRESETS,
@@ -178,6 +180,7 @@ export const WORD_UI_LOCALE = {
       selectAll: "Select all",
     },
     file: {
+      open: "Open",
       export: "Export",
       exportWord: "Word document (.docx)",
       exportPdf: "PDF",
@@ -326,6 +329,7 @@ const WORD_ICONS = {
   DocsMultiIcon,
   DownBorderDoubleIcon,
   ExportIcon,
+  ImportIcon,
   FlipHorizontalIcon,
   LeftBorderDoubleIcon,
   NoBorderIcon,
@@ -426,9 +430,19 @@ const CELL_ALIGNMENTS: { label: string; icon: string; horizontal: number; vertic
 function buildWordMenuSchema(): MenuSchemaType {
   return {
     [WORD_GROUP.FILE]: {
-      [ExportDocumentCommandId]: {
+      [ImportDocumentCommandId]: {
         order: 0,
         gridLayout: { row: 1, column: 1, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          button(accessor, {
+            id: ImportDocumentCommandId,
+            icon: "ImportIcon",
+            title: "dockaro.file.open",
+          }),
+      },
+      [ExportDocumentCommandId]: {
+        order: 1,
+        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
         menuItemFactory: (accessor: IAccessor) =>
           selector(accessor, {
             id: ExportDocumentCommandId,
@@ -442,8 +456,8 @@ function buildWordMenuSchema(): MenuSchemaType {
           }),
       },
       "dockaro.menu.print": {
-        order: 1,
-        gridLayout: { row: 1, column: 2, rowSpan: 2, showLabel: true },
+        order: 2,
+        gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
         menuItemFactory: (accessor: IAccessor) =>
           button(accessor, {
             id: "dockaro.menu.print",
@@ -454,8 +468,8 @@ function buildWordMenuSchema(): MenuSchemaType {
           }),
       },
       "dockaro.menu.page-setup": {
-        order: 2,
-        gridLayout: { row: 1, column: 3, rowSpan: 2, showLabel: true },
+        order: 3,
+        gridLayout: { row: 1, column: 4, rowSpan: 2, showLabel: true },
         menuItemFactory: (accessor: IAccessor) =>
           button(accessor, {
             id: "dockaro.menu.page-setup",

@@ -8,6 +8,7 @@ type EditorApi = {
   ready: Promise<unknown>;
   getHTML: () => Promise<string>;
   getDocx: () => Promise<Blob>;
+  loadDocx: (file: File) => Promise<{ warnings: string[] }>;
   destroy: () => void;
 };
 
@@ -31,6 +32,7 @@ const SNIPPET = `<div id="editor"></div>
   });
 
   await editor.ready;
+  await editor.loadDocx(file);           // open an existing .docx
   const html = await editor.getHTML();   // an HTML fragment
   const docx = await editor.getDocx();   // a real .docx Blob
 </script>`;
@@ -126,6 +128,24 @@ export default function EmbedDemoPage() {
             >
               getHTML()
             </button>
+            <label className="cursor-pointer rounded-lg border border-border px-4 py-2 text-sm transition-colors hover:bg-surface">
+              loadDocx()
+              <input
+                type="file"
+                accept=".docx"
+                className="hidden"
+                data-testid="embed-load-docx"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const { warnings } = await editorRef.current!.loadDocx(file);
+                  setOutput(
+                    `Loaded ${file.name}` +
+                      (warnings.length ? ` — ${warnings.join("; ")}` : ""),
+                  );
+                }}
+              />
+            </label>
             <button
               onClick={async () => {
                 const blob = await editorRef.current!.getDocx();

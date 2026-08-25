@@ -38,6 +38,10 @@ function parentOrigin(): string {
   return "*";
 }
 
+/** Must match the key DocsEditor is mounted with, below. */
+const storageKeyFor = (documentId: string, mode: EmbedMode) =>
+  `embed:${documentId}:${mode}`;
+
 export default function EmbedHost({
   documentId,
   mode,
@@ -88,6 +92,20 @@ export default function EmbedHost({
           mimeType: blob.type,
           filename: `${snapshot.title || "document"}.docx`,
         };
+      }
+      case "loadDocx": {
+        const { importDocx } = await import("@/lib/univer/docx/import");
+        const { document: imported, warnings } = await importDocx(
+          request.buffer,
+          request.fileName,
+        );
+        // The editor's own replace path: it suppresses the autosave that
+        // would otherwise write the outgoing document back over the import
+        // during the reload. Deferred a tick so this call's response reaches
+        // the host before the frame navigates — otherwise the caller's
+        // promise never settles.
+        setTimeout(() => api.replaceDocument(imported), 0);
+        return { warnings };
       }
       case "getSnapshot":
         return api.getSnapshot();
@@ -160,7 +178,7 @@ export default function EmbedHost({
           mode,
           // Each embedded document gets its own autosave slot, so two
           // editors on one page never overwrite each other.
-          storageKey: `embed:${documentId}:${mode}`,
+          storageKey: storageKeyFor(documentId, mode),
           wordChrome: mode === "document",
         }}
       />

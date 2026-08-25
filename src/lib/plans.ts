@@ -61,7 +61,7 @@ export const suitePlans: SuitePlan[] = [
     features: [
       "Docs + Sheets editors",
       "Up to 3 active documents",
-      "Export to .docx / .xlsx / PDF",
+      "Open and export .docx — real Word files",
       "DocKaro watermark on PDF export",
       "Community support",
     ],

@@ -35,6 +35,7 @@ export const InsertPageBreakCommandId = "dockaro.command.page-break";
 export const InsertBlankPageCommandId = "dockaro.command.blank-page";
 export const EditHeaderFooterCommandId = "dockaro.command.header-footer";
 export const ExportDocumentCommandId = "dockaro.command.export";
+export const ImportDocumentCommandId = "dockaro.command.import";
 export const SetPageMarginsCommandId = "dockaro.command.page-margins";
 export const SetPageOrientationCommandId = "dockaro.command.page-orientation";
 export const SetPageSizeCommandId = "dockaro.command.page-size";
@@ -86,6 +87,12 @@ export interface WordCommandContext {
   doc: WordDocumentApi;
   /** The element Univer's canvas + contenteditable live in. */
   getContainer: () => HTMLElement | null;
+  /**
+   * Swap the whole document for an imported one. Univer builds its document
+   * unit once at mount, so replacing the content is the editor's job, not a
+   * command's — see DocsEditor for how it is done.
+   */
+  onReplaceDocument?: (document: IDocumentData, warnings: string[]) => void;
 }
 
 function getDocModel(accessor: IAccessor): DocumentDataModel | null {
@@ -196,7 +203,7 @@ export interface ISetZoomParams {
 }
 
 export function createWordCommands(context: WordCommandContext): ICommand[] {
-  const { doc, getContainer } = context;
+  const { doc, getContainer, onReplaceDocument } = context;
 
   const setLineSpacing: ICommand<ISetLineSpacingParams> = {
     id: SetLineSpacingCommandId,
@@ -330,6 +337,53 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     },
   };
 
+  // Word's File > Open. The picker is created on demand rather than kept in
+  // the DOM: a file input that lives across the editor's lifetime is one more
+  // thing to dispose, and the browser gives us nothing for holding onto it.
+  const importDocument: ICommand = {
+    id: ImportDocumentCommandId,
+    type: CommandType.COMMAND,
+    handler: async () => {
+      if (!onReplaceDocument) return false;
+
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept =
+        ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      input.style.display = "none";
+      document.body.appendChild(input);
+
+      const file = await new Promise<File | null>((resolve) => {
+        // `cancel` is not universally supported, so a focus-based fallback
+        // makes sure the input is always cleaned up.
+        input.onchange = () => resolve(input.files?.[0] ?? null);
+        input.oncancel = () => resolve(null);
+        input.click();
+      });
+      input.remove();
+      if (!file) return false;
+
+      try {
+        const { importDocx } = await import("./docx/import");
+        const { document: imported, warnings } = await importDocx(
+          await file.arrayBuffer(),
+          file.name,
+        );
+        onReplaceDocument(imported, warnings);
+        return true;
+      } catch (error) {
+        // A file we cannot read is a normal outcome, not a crash: say so and
+        // leave the open document untouched.
+        window.alert(
+          error instanceof Error
+            ? `Could not open this document.\n\n${error.message}`
+            : "Could not open this document.",
+        );
+        return false;
+      }
+    },
+  };
+
   const setPageMargins: ICommand<ISetPageMarginsParams> = {
     id: SetPageMarginsCommandId,
     type: CommandType.COMMAND,
@@ -439,6 +493,7 @@ export function createWordCommands(context: WordCommandContext): ICommand[] {
     insertBlankPage,
     editHeaderFooter,
     exportDoc,
+    importDocument,
     setPageMargins,
     setPageOrientation,
     setPageSize,

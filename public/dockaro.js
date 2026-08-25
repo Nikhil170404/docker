@@ -153,6 +153,20 @@
         });
       },
 
+      /**
+       * Replace the editor's content with a .docx the user picked.
+       * Accepts a File or Blob; resolves once the editor has reloaded.
+       */
+      loadDocx: function (file) {
+        return file.arrayBuffer().then(function (buffer) {
+          return whenReady({
+            type: "loadDocx",
+            buffer: buffer,
+            fileName: file.name || "document.docx",
+          });
+        });
+      },
+
       /** The raw document model, if you want to store it and reload it later. */
       getSnapshot: function () {
         return whenReady({ type: "getSnapshot" });

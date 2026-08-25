@@ -38,6 +38,8 @@ export const EMBED_MESSAGE_NAMESPACE = "dockaro-embed";
 
 export type EmbedRequest =
   | { type: "getHTML" }
+  /** Replace the editor's content with an uploaded .docx. */
+  | { type: "loadDocx"; buffer: ArrayBuffer; fileName: string }
   | { type: "getDocx" }
   | { type: "getSnapshot" }
   | { type: "setName"; name: string }

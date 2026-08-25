@@ -114,6 +114,7 @@ const matrix: { feature: string; us: Cell; ck: Cell; tiny: Cell }[] = [
   { feature: "No licence key to paste into config", us: true, ck: false, tiny: false },
   { feature: "No licence banner shown to end users", us: true, ck: false, tiny: false },
   { feature: "Rich text AND paginated documents", us: true, ck: false, tiny: false },
+  { feature: "Opens a real .docx", us: true, ck: false, tiny: false },
   { feature: "Exports a real .docx", us: true, ck: "Paid add-on", tiny: "Paid add-on" },
   { feature: "All features in every tier", us: true, ck: false, tiny: false },
   { feature: "Buy without a sales call", us: true, ck: "Cloud only", tiny: "Cloud only" },

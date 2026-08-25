@@ -19,7 +19,7 @@ const products = [
     icon: FileText,
     name: "Docs",
     tagline: "A full Word replacement",
-    desc: "Rich formatting, deep table control, headers & footers, styles, and a real .docx export — not a stripped-down text box.",
+    desc: "Rich formatting, deep table control, headers & footers, styles, and real .docx open and export — not a stripped-down text box.",
     href: "/editor/docs",
   },
   {
@@ -54,8 +54,8 @@ const faqs = [
     a: "Yes. The Free plan gives you unlimited documents with core editing in Docs and Sheets, no credit card required.",
   },
   {
-    q: "Can I get my work out as a Word file?",
-    a: "Yes — every document exports to a real .docx (not HTML renamed), plus PDF and HTML. Opening an existing .docx for editing is in progress; today DocKaro creates and exports documents rather than importing them.",
+    q: "Can I open and save real Word files?",
+    a: "Yes, both ways. File > Open reads a .docx — text, headings, lists, tables, shading and page setup — and export writes a genuine .docx (not HTML renamed), plus PDF and HTML. Images, headers and footers are not carried in on import yet, and the editor tells you when it leaves something out.",
   },
   {
     q: "Do you have an API?",

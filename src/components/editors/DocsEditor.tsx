@@ -112,6 +112,13 @@ export type DocsEditorHandle = {
   setMargins: (margins: { marginLeft?: number; marginRight?: number }) => void;
   /** The live document, for callers that need to serialise it (the embed bridge). */
   getSnapshot: () => IDocumentData | null;
+  /**
+   * Swap the whole document for another one (an imported .docx). Persists it
+   * and remounts — the only safe way to replace a Univer document unit, and
+   * the only path that suppresses the autosave which would otherwise write
+   * the outgoing document straight back over it.
+   */
+  replaceDocument: (document: IDocumentData) => void;
 };
 
 export default function DocsEditor({
@@ -138,6 +145,7 @@ export default function DocsEditor({
   const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
   const documentNameRef = useRef<(name: string) => void>(() => {});
   const snapshotRef = useRef<() => IDocumentData | null>(() => null);
+  const replaceDocumentRef = useRef<(document: IDocumentData) => void>(() => {});
   const statusListenerRef = useRef(onStatusChange);
   const [ready, setReady] = useState(false);
 
@@ -242,7 +250,24 @@ export default function DocsEditor({
     const registrations = [
       SetBorderPenCommand,
       ...ALL_TABLE_STYLE_COMMANDS,
-      ...createWordCommands({ doc: fDoc, getContainer: () => containerRef.current }),
+      ...createWordCommands({
+        doc: fDoc,
+        getContainer: () => containerRef.current,
+        onReplaceDocument: (imported, warnings) => {
+          // Univer builds its document unit once, at mount, and there is no
+          // supported way to swap a unit's whole body underneath a live
+          // render. Persisting the import and remounting is the predictable
+          // path: it reuses the same load route every refresh already takes,
+          // so an imported file behaves exactly like a reopened one.
+          //
+          if (warnings.length) {
+            window.alert(
+              `Opened with some parts left out:\n\n${warnings.map((w) => `\u2022 ${w}`).join("\n")}`,
+            );
+          }
+          replaceDocumentRef.current(imported);
+        },
+      }),
       ...createWordFeatureCommands(fDoc),
       createSpellCheckCommand(spellChecker),
       ...createTrackChangesCommands(trackChanges),
@@ -373,7 +398,24 @@ export default function DocsEditor({
     // keystroke, and flush immediately on refresh/close so the last edit
     // isn't lost (React's unmount cleanup never runs on a hard refresh).
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
-    const flushSave = () => saveSnapshot(storageKey, fDoc.save());
+    // Set while an imported document is being swapped in, so no in-flight
+    // autosave can write the outgoing document over it.
+    let replacingDocument = false;
+    const flushSave = () => {
+      if (replacingDocument) return;
+      saveSnapshot(storageKey, fDoc.save());
+    };
+    // Order matters. reload() fires `beforeunload`, and this editor flushes
+    // the CURRENT (pre-import) document there — which would overwrite the
+    // import a moment after it was written. So retire the autosave first,
+    // then persist, then reload.
+    replaceDocumentRef.current = (imported: IDocumentData) => {
+      replacingDocument = true;
+      clearTimeout(saveTimeout);
+      window.removeEventListener("beforeunload", flushSave);
+      saveSnapshot(storageKey, imported);
+      window.location.reload();
+    };
     // Word shows its Table Design tab whenever the cursor is inside a
     // table. The caret's offset against the document's own table ranges is
     // the reliable test: the selection's node path is empty right after a
@@ -477,6 +519,7 @@ export default function DocsEditor({
       commandServiceRef.current = null;
       documentNameRef.current = () => {};
       snapshotRef.current = () => null;
+      replaceDocumentRef.current = () => {};
       rulerGeometryRef.current = () => null;
       setReady(false);
     };
@@ -495,6 +538,7 @@ export default function DocsEditor({
       void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
     },
     getSnapshot: () => snapshotRef.current(),
+    replaceDocument: (document) => replaceDocumentRef.current(document),
   }));
 
   return (
