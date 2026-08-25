@@ -40,6 +40,7 @@ import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
 import { createWordFeatureCommands } from "@/lib/univer/word-features";
 import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-check";
 import { createTrackChanges, createTrackChangesCommands } from "@/lib/univer/track-changes";
+import { createWatermarkCommand } from "@/lib/univer/watermark";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
@@ -185,6 +186,7 @@ export default function DocsEditor({
       ...createWordFeatureCommands(fDoc),
       createSpellCheckCommand(spellChecker),
       ...createTrackChangesCommands(trackChanges),
+      createWatermarkCommand(fDoc),
     ].map((command) => commandService.registerCommand(command));
     commandServiceRef.current = commandService;
     documentNameRef.current = (name: string) => {

@@ -80,6 +80,7 @@ import {
 } from "./word-commands";
 import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
 import { ToggleSpellCheckCommandId } from "./spell-check";
+import { SetWatermarkCommandId } from "./watermark";
 import { ResolveTrackedChangesCommandId, ToggleTrackChangesCommandId } from "./track-changes";
 import {
   InsertCoverPageCommandId,
@@ -193,6 +194,11 @@ export const WORD_UI_LOCALE = {
       columnsRight: "Right",
       columnsLine: "Two with line between",
       headerFooterOptions: "Header options",
+      watermark: "Watermark",
+      watermarkConfidential: "CONFIDENTIAL",
+      watermarkDraft: "DRAFT",
+      watermarkSample: "SAMPLE",
+      watermarkNone: "No watermark",
       differentFirstPage: "Different first page",
       sameFirstPage: "Same first page",
       differentOddEven: "Different odd & even pages",
@@ -698,6 +704,22 @@ function buildWordMenuSchema(): MenuSchemaType {
               option("dockaro.layout.columnsLeft", { count: 2, weights: [1, 2] }),
               option("dockaro.layout.columnsRight", { count: 2, weights: [2, 1] }),
               option("dockaro.layout.columnsLine", { count: 2, separator: true }),
+            ],
+          }),
+      },
+      [SetWatermarkCommandId]: {
+        order: 7,
+        gridLayout: { row: 1, column: 8, rowSpan: 2, showLabel: true },
+        menuItemFactory: (accessor: IAccessor) =>
+          selector(accessor, {
+            id: SetWatermarkCommandId,
+            icon: "ShapeRectIcon",
+            title: "dockaro.layout.watermark",
+            selections: [
+              option("dockaro.layout.watermarkConfidential", { text: "CONFIDENTIAL" }),
+              option("dockaro.layout.watermarkDraft", { text: "DRAFT" }),
+              option("dockaro.layout.watermarkSample", { text: "SAMPLE" }),
+              option("dockaro.layout.watermarkNone", { text: null }),
             ],
           }),
       },
