@@ -83,8 +83,45 @@ const CELL_V_ALIGN: Record<string, VerticalAlignmentType> = {
 /* Small DOM helpers                                                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Descendant lookup by local name, in the WordprocessingML namespace.
+ *
+ * Deliberately not `getElementsByTagNameNS`: implementations disagree about
+ * it for XML documents (happy-dom returns nothing at all, even though it
+ * parses `namespaceURI` correctly), and a document that opens in one engine
+ * but not another is exactly the class of bug this format punishes you for.
+ * `localName` + `namespaceURI` is the part everyone implements the same way.
+ */
+function firstDescendant(parent: Element | null, name: string): Element | null {
+  if (!parent) return null;
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType !== 1) continue;
+    const el = node as Element;
+    if (el.localName === name && el.namespaceURI === W_NS) return el;
+    const nested = firstDescendant(el, name);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** Every descendant with this local name, in document order. */
+function allDescendants(parent: Element | null, name: string): Element[] {
+  if (!parent) return [];
+  const out: Element[] = [];
+  const walk = (node: Element) => {
+    for (const candidate of Array.from(node.childNodes)) {
+      if (candidate.nodeType !== 1) continue;
+      const el = candidate as Element;
+      if (el.localName === name && el.namespaceURI === W_NS) out.push(el);
+      walk(el);
+    }
+  };
+  walk(parent);
+  return out;
+}
+
 const child = (parent: Element | null, name: string): Element | null =>
-  parent ? (parent.getElementsByTagNameNS(W_NS, name)[0] ?? null) : null;
+  firstDescendant(parent, name);
 
 /** Direct children only — `w:p` inside a nested table must not leak out. */
 function directChildren(parent: Element, name: string): Element[] {
@@ -98,8 +135,22 @@ function directChildren(parent: Element, name: string): Element[] {
   return out;
 }
 
-const attr = (el: Element | null, name: string): string | null =>
-  el ? el.getAttributeNS(W_NS, name) : null;
+/**
+ * Reads a `w:`-namespaced attribute.
+ *
+ * Same caution as the element lookup above: `getAttributeNS` is unreliable
+ * across XML DOM implementations, so the prefixed literal is tried next, and
+ * finally the bare name — which is what a document that declares the w
+ * namespace as its default would carry.
+ */
+function attr(el: Element | null, name: string): string | null {
+  if (!el) return null;
+  return (
+    el.getAttributeNS(W_NS, name) ??
+    el.getAttribute(`w:${name}`) ??
+    el.getAttribute(name)
+  );
+}
 
 function numAttr(el: Element | null, name: string): number | null {
   const raw = attr(el, name);
@@ -350,14 +401,9 @@ function readParagraph(p: Element, builder: BodyBuilder) {
 
 /** A paragraph with no text, tab or break of its own. */
 function isEmptyParagraph(p: Element): boolean {
-  for (const el of [
-    ...Array.from(p.getElementsByTagNameNS(W_NS, "t")),
-    ...Array.from(p.getElementsByTagNameNS(W_NS, "tab")),
-    ...Array.from(p.getElementsByTagNameNS(W_NS, "br")),
-  ]) {
-    if (el.localName !== "t" || (el.textContent ?? "").length > 0) return false;
-  }
-  return true;
+  if (allDescendants(p, "tab").length > 0) return false;
+  if (allDescendants(p, "br").length > 0) return false;
+  return allDescendants(p, "t").every((el) => (el.textContent ?? "").length === 0);
 }
 
 /**
@@ -603,7 +649,7 @@ export async function importDocx(
     throw new Error("This document's XML could not be parsed.");
   }
 
-  const bodyEl = dom.getElementsByTagNameNS(W_NS, "body")[0];
+  const bodyEl = firstDescendant(dom.documentElement, "body");
   if (!bodyEl) throw new Error("This document has no body.");
 
   const builder = new BodyBuilder();
@@ -620,10 +666,10 @@ export async function importDocx(
   if (archive.files.size && [...archive.files.keys()].some((p) => p.startsWith("word/media/"))) {
     warnings.push("Images were not imported.");
   }
-  if (child(bodyEl, "sectPr") && dom.getElementsByTagNameNS(W_NS, "headerReference").length) {
+  if (allDescendants(dom.documentElement, "headerReference").length > 0) {
     warnings.push("Headers and footers were not imported.");
   }
-  if (dom.getElementsByTagNameNS(W_NS, "footnoteReference").length) {
+  if (allDescendants(dom.documentElement, "footnoteReference").length > 0) {
     warnings.push("Footnotes were not imported.");
   }
 

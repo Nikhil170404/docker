@@ -4,3 +4,9 @@ node_modules/
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+
+# test artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+/tests/e2e/.fixtures/
