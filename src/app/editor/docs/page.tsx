@@ -47,7 +47,13 @@ export default function DocsEditorPage() {
         }
       />
       <div className="word-docs flex min-h-0 flex-1 flex-col overflow-hidden bg-word-canvas">
-        <DocsEditor apiRef={apiRef} onStatusChange={setStatus} />
+        <DocsEditor
+          apiRef={apiRef}
+          onStatusChange={setStatus}
+          // A real server document, so the work survives a cleared cache
+          // or a different browser rather than living only in this one.
+          options={{ documentId: "docs-default" }}
+        />
       </div>
       <WordStatusBar
         currentPage={status.currentPage}

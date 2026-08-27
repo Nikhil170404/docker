@@ -51,6 +51,22 @@ const endpoints = [
     desc: "Permanently delete a document.",
     response: "204 No Content",
   },
+  {
+    method: "GET",
+    path: "/v1/documents/:id/content",
+    desc: "Read a document's saved content. Called by the editor itself, so it takes no API key — the document id is the capability. Content is null for a document nobody has saved yet.",
+    response: `{ "content": { "body": { ... }, "documentStyle": { ... } } }`,
+  },
+  {
+    method: "PUT",
+    path: "/v1/documents/:id/content",
+    desc: "Save a document's content. Creates the document if the id is new, so a host can choose its own ids.",
+    body: `{
+  "content": { ... },   // the editor's snapshot
+  "title": "Invoice #1042"
+}`,
+    response: `{ "id": "doc_9f2a...", "updatedAt": "2026-08-27T12:00:00.000Z" }`,
+  },
 ];
 
 const methodColor: Record<string, string> = {

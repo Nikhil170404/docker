@@ -10,3 +10,6 @@ tsconfig.tsbuildinfo
 /playwright-report/
 /blob-report/
 /tests/e2e/.fixtures/
+
+# local document store (DOCKARO_DATA_DIR)
+/.data/

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorize } from "@/lib/api-auth";
-import { createDocument, listDocuments } from "@/lib/document-store";
+import { createDocument, listDocuments } from "@/lib/server/document-repository";
 
 export async function GET(req: NextRequest) {
   const auth = authorize(req);
   if (!auth.ok) return auth.response;
 
-  return NextResponse.json({ data: listDocuments() }, { headers: auth.headers });
+  return NextResponse.json({ data: await listDocuments() }, { headers: auth.headers });
 }
 
 export async function POST(req: NextRequest) {
@@ -27,6 +27,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const doc = createDocument({ type: body.type, title: body.title });
+  const doc = await createDocument({ type: body.type, title: body.title });
   return NextResponse.json(doc, { status: 201, headers: auth.headers });
 }

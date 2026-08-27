@@ -22,7 +22,8 @@ import {
   resolveLiveTableRange,
 } from "@/lib/univer/table-style-commands";
 import { SetBorderPenCommand } from "@/lib/univer/border-pen";
-import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
+import { saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
+import { createDocumentStore } from "@/lib/univer/remote-persistence";
 import {
   createWordCommands,
   SetIndentCommandId,
@@ -81,6 +82,11 @@ export type DocsEditorOptions = {
   mode?: EmbedMode;
   /** localStorage key for the autosaved snapshot. */
   storageKey?: string;
+  /**
+   * Server-side document to load and save. Null keeps everything local,
+   * which is what the standalone editor does when opened without one.
+   */
+  documentId?: string | null;
   /** Word ribbon + rulers. Off gives Univer's own compact toolbar. */
   wordChrome?: boolean;
 };
@@ -134,10 +140,13 @@ export default function DocsEditor({
   // is built with cannot change underneath it. A lazy useState initialiser
   // (rather than a ref) keeps these readable during render, which the
   // vertical ruler below needs.
-  const [{ mode, storageKey, wordChrome }] = useState<Required<DocsEditorOptions>>(() => ({
+  const [{ mode, storageKey, wordChrome, documentId }] = useState<
+    Required<DocsEditorOptions>
+  >(() => ({
     mode: options?.mode ?? "document",
     storageKey: options?.storageKey ?? DEFAULT_STORAGE_KEY,
     wordChrome: options?.wordChrome ?? (options?.mode ?? "document") === "document",
+    documentId: options?.documentId ?? null,
   }));
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
@@ -158,6 +167,17 @@ export default function DocsEditor({
   useEffect(() => {
     if (!containerRef.current || disposedRef.current) return;
     disposedRef.current = true;
+
+    // Loading now involves a round trip, so the whole of setup runs inside an
+    // async body and publishes its teardown when it is done. A component that
+    // unmounts mid-fetch sets `cancelled`, and the editor is never built.
+    let cancelled = false;
+    let teardown: (() => void) | null = null;
+
+    void (async () => {
+    const store = createDocumentStore(documentId, storageKey);
+    const remote = await store.load();
+    if (cancelled || !containerRef.current) return;
 
     // Word types "/" as a character; Univer's block menu steals the key.
     disableSlashMenu();
@@ -202,7 +222,7 @@ export default function DocsEditor({
     // (it used to crash at creation time in 0.25.x — see git history), so
     // they'd silently lose pagination/header-footer on load. Backfill it
     // for any saved doc that predates this, without touching its content.
-    let saved = loadSnapshot<Partial<IDocumentData>>(storageKey);
+    let saved = remote as Partial<IDocumentData> | null;
 
     // 1.0.0-beta.2 added a strict structural-integrity check that now runs
     // on every edit (table start/end tokens, section IDs, etc.) and throws
@@ -277,7 +297,7 @@ export default function DocsEditor({
     snapshotRef.current = () => fDoc.save();
     documentNameRef.current = (name: string) => {
       fDoc.setName(name);
-      saveSnapshot(storageKey, fDoc.save());
+      store.save(fDoc.save());
       void refreshStatus();
     };
 
@@ -403,7 +423,8 @@ export default function DocsEditor({
     let replacingDocument = false;
     const flushSave = () => {
       if (replacingDocument) return;
-      saveSnapshot(storageKey, fDoc.save());
+      store.save(fDoc.save());
+      store.flush();
     };
     // Order matters. reload() fires `beforeunload`, and this editor flushes
     // the CURRENT (pre-import) document there — which would overwrite the
@@ -413,7 +434,10 @@ export default function DocsEditor({
       replacingDocument = true;
       clearTimeout(saveTimeout);
       window.removeEventListener("beforeunload", flushSave);
-      saveSnapshot(storageKey, imported);
+      // Written straight through: the reload must find the imported document
+      // already on the server, not a debounced write that never fired.
+      store.save(imported);
+      store.flush();
       window.location.reload();
     };
     // Word shows its Table Design tab whenever the cursor is inside a
@@ -462,7 +486,7 @@ export default function DocsEditor({
     setReady(true);
     void refreshStatus();
 
-    return () => {
+    teardown = () => {
       subscription.unsubscribe();
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
@@ -523,7 +547,19 @@ export default function DocsEditor({
       rulerGeometryRef.current = () => null;
       setReady(false);
     };
-  }, [mode, storageKey, wordChrome]);
+
+      // Unmounted while the editor was still being built: tear it straight
+      // down, since the effect's own cleanup has already run by now.
+      if (cancelled) teardown();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (teardown) teardown();
+      // Never finished mounting, so release the guard for the next attempt.
+      else disposedRef.current = false;
+    };
+  }, [mode, storageKey, wordChrome, documentId]);
 
   useImperativeHandle(apiRef, () => ({
     setName: (name: string) => documentNameRef.current(name),

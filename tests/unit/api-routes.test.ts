@@ -1,5 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
+
+// Documents are on disk now, so the routes get a throwaway directory rather
+// than writing into the working tree.
+const DATA_DIR = mkdtempSync(join(tmpdir(), "dockaro-api-"));
+process.env.DOCKARO_DATA_DIR = DATA_DIR;
 import { GET, POST } from "@/app/api/v1/documents/route";
 import {
   DELETE as DELETE_ONE,
@@ -26,7 +34,12 @@ function req(
 
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
-beforeEach(() => __resetUsage());
+beforeEach(() => {
+  __resetUsage();
+  for (const name of readdirSync(DATA_DIR)) rmSync(join(DATA_DIR, name), { force: true });
+});
+
+afterAll(() => rmSync(DATA_DIR, { recursive: true, force: true }));
 
 describe("authentication", () => {
   it("rejects a request with no key", async () => {

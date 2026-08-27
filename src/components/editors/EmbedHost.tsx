@@ -179,6 +179,12 @@ export default function EmbedHost({
           // Each embedded document gets its own autosave slot, so two
           // editors on one page never overwrite each other.
           storageKey: storageKeyFor(documentId, mode),
+          // Exactly the id the host mounted with — no suffix. A document
+          // created through the API and then embedded by its own id has to
+          // load and save as itself, and the two modes are two renderings of
+          // one document, not two documents. The local cache key below still
+          // carries the mode, since that is a per-rendering cache.
+          documentId,
           wordChrome: mode === "document",
         }}
       />
