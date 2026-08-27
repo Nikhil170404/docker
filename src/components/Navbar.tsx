@@ -36,7 +36,7 @@ export default function Navbar() {
 
         <div className="flex items-center gap-3">
           <Link
-            href="/editor/docs"
+            href="/signin"
             className="hidden text-sm text-muted transition-colors hover:text-foreground sm:block"
           >
             Sign in
@@ -72,7 +72,7 @@ export default function Navbar() {
               </Link>
             ))}
             <Link
-              href="/editor/docs"
+              href="/signin"
               onClick={() => setOpen(false)}
               className="rounded-md px-2 py-2.5 transition-colors hover:bg-white/5 hover:text-foreground"
             >

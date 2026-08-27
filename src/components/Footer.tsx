@@ -22,6 +22,7 @@ const columns = [
   {
     title: "Company",
     links: [
+      { href: "/account", label: "Account" },
       { href: "/#faq", label: "FAQ" },
       { href: "mailto:hello@dockaro.com", label: "Contact" },
       { href: "/legal/privacy", label: "Privacy" },

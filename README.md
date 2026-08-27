@@ -20,6 +20,29 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Accounts and payments
+
+Both are optional. With neither configured the editor, the embed and the site
+all work; the sign-in page explains what is missing and every paid path
+refuses with a reason rather than half-working. Copy `.env.example` to
+`.env.local` to enable them.
+
+**Accounts** — Supabase, email magic link. No passwords, so no reset flow and
+nothing to breach. `src/middleware.ts` refreshes the session on every
+navigation, because Server Components cannot write cookies and the token
+would otherwise be discarded roughly hourly.
+
+**Payments** — Razorpay for both markets: INR with UPI, netbanking, cards and
+wallets in India, and USD international cards once International Payments is
+enabled on the account. One gateway means one reconciliation and one webhook
+path.
+
+The amount is always computed on the server from the plan id — a price posted
+by the browser is a price the browser can edit. Access is granted only by the
+signed webhook at `/api/v1/billing/webhook`; the browser's success callback
+just shows a receipt. Orders are recorded before checkout opens, so a webhook
+for an order we never created is rejected even with a valid signature.
+
 ## Document storage
 
 Documents live on disk, one JSON file per document, written atomically

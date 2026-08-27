@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { Check, ShieldCheck, Server } from "lucide-react";
+import CheckoutButton from "@/components/billing/CheckoutButton";
 import clsx from "clsx";
 import {
   suitePlans,
@@ -113,6 +114,7 @@ export default function PricingSection({
             return (
               <PlanCard
                 key={plan.id}
+                planId={plan.id}
                 name={plan.name}
                 tagline={plan.tagline}
                 price={formatMoney(shownPrice(raw, period), currency)}
@@ -123,6 +125,10 @@ export default function PricingSection({
                 cta={plan.cta}
                 href={plan.href}
                 features={plan.features}
+                payable={raw > 0}
+                currency={currency}
+                period={period}
+                seats={plan.unit.includes("/user") ? 3 : undefined}
               />
             );
           })}
@@ -135,6 +141,7 @@ export default function PricingSection({
               return (
                 <PlanCard
                   key={plan.id}
+                  planId={plan.id}
                   name={plan.name}
                   tagline={plan.tagline}
                   price={formatMoney(shownPrice(raw, period), currency)}
@@ -145,6 +152,9 @@ export default function PricingSection({
                   cta={plan.cta}
                   href={plan.href}
                   features={plan.features}
+                  payable={raw > 0}
+                  currency={currency}
+                  period={period}
                   badge={
                     plan.loads !== null
                       ? `${formatLoads(plan.loads)} loads / mo`
@@ -194,6 +204,7 @@ export default function PricingSection({
 }
 
 function PlanCard({
+  planId,
   name,
   tagline,
   price,
@@ -205,7 +216,17 @@ function PlanCard({
   href,
   features,
   badge,
+  payable,
+  currency,
+  period,
+  seats,
 }: {
+  planId: string;
+  /** Paid plans open a checkout; free ones just link into the product. */
+  payable: boolean;
+  currency: Currency;
+  period: Period;
+  seats?: number;
   name: string;
   tagline: string;
   price: string;
@@ -247,15 +268,26 @@ function PlanCard({
       {note && <p className="mt-2 text-xs text-muted">{note}</p>}
       {billedAnnually && <p className="mt-1 text-xs text-muted">billed annually</p>}
 
-      <Link
-        href={href}
-        className={clsx(
-          "mt-6 rounded-lg px-4 py-2.5 text-center text-sm font-medium transition-opacity hover:opacity-90",
-          highlight ? "bg-white text-black" : "border border-border text-foreground",
-        )}
-      >
-        {cta}
-      </Link>
+      {payable ? (
+        <CheckoutButton
+          planId={planId}
+          currency={currency}
+          period={period}
+          seats={seats}
+          label={cta}
+          highlight={highlight}
+        />
+      ) : (
+        <Link
+          href={href}
+          className={clsx(
+            "mt-6 rounded-lg px-4 py-2.5 text-center text-sm font-medium transition-opacity hover:opacity-90",
+            highlight ? "bg-white text-black" : "border border-border text-foreground",
+          )}
+        >
+          {cta}
+        </Link>
+      )}
 
       <ul className="mt-7 space-y-3 text-sm">
         {features.map((f) => (

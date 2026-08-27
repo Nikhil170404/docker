@@ -13,6 +13,8 @@
     "test:all": "npm run test && npm run test:e2e"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.5",
+    "@supabase/supabase-js": "^2.112.4",
     "@univerjs/docs-find-replace": "1.0.0-beta.2",
     "@univerjs/docs-ui": "1.0.0-beta.2",
     "@univerjs/engine-render": "1.0.0-beta.2",
