@@ -129,6 +129,7 @@ export const embedPlans: EmbedPlan[] = [
     features: [
       "5,000 editor loads / month",
       "Rich-text AND document mode",
+      "Paste-from-Word cleanup included",
       "HTML and .docx out of the same embed",
       "No licence key, no banner, ever",
       "Community support",

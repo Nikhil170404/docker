@@ -143,3 +143,46 @@ test.describe("Word editor", () => {
     expect(messages.filter((m) => /left out/i.test(m))).toHaveLength(0);
   });
 });
+
+test.describe("pasting from Word", () => {
+  test("cleans Word's markup into a real list", async ({ page }) => {
+    page.on("dialog", (d) => d.accept());
+    await page.goto("/editor/docs");
+    await waitForEditor(page);
+    await page.locator("canvas").first().click({ position: { x: 250, y: 150 } });
+
+    // The shape Word actually puts on the clipboard: fragment markers,
+    // downlevel-revealed conditionals, mso-list paragraphs with a literal
+    // bullet, and an <o:p> for good measure.
+    await page.evaluate(() => {
+      const html = [
+        "<!--StartFragment-->",
+        "<p class=MsoNormal><span style='mso-fareast-font-family:Calibri'>Heading text<o:p></o:p></span></p>",
+        "<p class=MsoListParagraph style='mso-list:l0 level1 lfo1'>",
+        "<![if !supportLists]><span style='mso-list:Ignore'>&middot;<span style='font:7.0pt'>&nbsp;&nbsp;</span></span><![endif]>Alpha item</p>",
+        "<p class=MsoListParagraph style='mso-list:l0 level1 lfo1'>",
+        "<![if !supportLists]><span style='mso-list:Ignore'>&middot;<span style='font:7.0pt'>&nbsp;&nbsp;</span></span><![endif]>Beta item</p>",
+        "<!--EndFragment-->",
+      ].join("");
+
+      const data = new DataTransfer();
+      data.setData("text/html", html);
+      data.setData("text/plain", "Heading text\nAlpha item\nBeta item");
+      document
+        .querySelector("canvas")
+        ?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true }));
+    });
+
+    await page.waitForTimeout(3_000);
+    const model = await readModel(page);
+    const text = String(model?.plain ?? "");
+
+    expect(text).toContain("Alpha item");
+    expect(text).toContain("Beta item");
+    // Word's own bullet glyph must not survive as text next to a real list
+    // marker — the double-bullet everyone complains about.
+    expect(text).not.toContain("·");
+    // And none of Word's private styling may reach the document.
+    expect(JSON.stringify(model)).not.toMatch(/mso-/i);
+  });
+});

@@ -43,6 +43,21 @@ signed webhook at `/api/v1/billing/webhook`; the browser's success callback
 just shows a receipt. Orders are recorded before checkout opens, so a webhook
 for an order we never created is rejected even with a valid signature.
 
+## Pasting from Word
+
+`src/lib/univer/paste-clean.ts` turns Word's clipboard HTML into something
+worth keeping: `mso-` declarations and Office-namespaced elements removed,
+flat `mso-list` paragraphs rebuilt into nested `ul`/`ol` trees, and Word's
+own bullet glyphs stripped so a real list marker does not double up.
+
+It is an allow-list rather than a block-list, which makes it a sanitiser as
+well as a cleaner — pasted markup is untrusted, so scripts, event handlers,
+`javascript:` URLs and `url()` in styles never reach the document.
+
+Cleaning happens on the HTML, before the editor parses it. Univer's own
+`onBeforePaste` hook runs after parsing, by which point Word's bullets are
+already text and the list structure is gone.
+
 ## API keys
 
 Generated on the account page, shown once, and stored only as a SHA-256

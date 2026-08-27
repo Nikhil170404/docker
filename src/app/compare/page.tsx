@@ -87,6 +87,17 @@ const painPoints = [
     },
   },
   {
+    problem: "Pasting from Word wrecks the formatting",
+    theirs:
+      "Years of open issues about lost bullets, dropped text and WebKit copying every computed style onto a span. Word's clipboard HTML is not really HTML — it carries mso- styles, Office-namespaced elements, and lists that are paragraphs with a literal bullet character. TinyMCE's fix for this, PowerPaste, is a paid plugin.",
+    ours:
+      "Included, and it rebuilds rather than strips: Word's flat mso-list paragraphs become properly nested ul/ol trees, its own bullet glyphs are removed so a real list marker does not double up, and every mso- declaration and empty span goes. The cleaner is an allow-list, so pasted scripts, event handlers and javascript: links never reach the document either.",
+    source: {
+      label: "TinyMCE paste-from-Word issues (#5349, #6986)",
+      href: "https://github.com/tinymce/tinymce/issues/6986",
+    },
+  },
+  {
     problem: "Features that used to be open, now upsells",
     theirs:
       "Both products split the editor into a core and a premium plugin catalogue, and plugins have moved from the open build into the commercial one across major versions.",
@@ -115,6 +126,7 @@ const matrix: { feature: string; us: Cell; ck: Cell; tiny: Cell }[] = [
   { feature: "No licence banner shown to end users", us: true, ck: false, tiny: false },
   { feature: "Rich text AND paginated documents", us: true, ck: false, tiny: false },
   { feature: "Opens a real .docx", us: "Included", ck: "Paid add-on", tiny: "Paid add-on" },
+  { feature: "Paste-from-Word cleanup", us: "Included", ck: true, tiny: "PowerPaste add-on" },
   { feature: "Exports a real .docx", us: "Included", ck: "Paid add-on", tiny: "Paid add-on" },
   { feature: "All features in every tier", us: true, ck: false, tiny: false },
   { feature: "Buy without a sales call", us: true, ck: "Cloud only", tiny: "Cloud only" },

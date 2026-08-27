@@ -37,6 +37,7 @@ import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
 import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
 import { disableSlashMenu } from "@/lib/univer/slash-key";
+import { installWordPasteCleaner } from "@/lib/univer/word-paste";
 import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
 import { createWordFeatureCommands } from "@/lib/univer/word-features";
 import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-check";
@@ -365,6 +366,9 @@ export default function DocsEditor({
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
     const pageChrome = wordChrome ? hidePageMarginMarks(injector, fDoc.getId()) : null;
+    // Word paste is cleaned in both modes: a rich-text field gets Word
+    // content pasted into it just as often as a document does.
+    const pasteCleaner = installWordPasteCleaner(injector, () => containerRef.current);
     const dialogFocus = restoreFocusAfterDialogs(injector, fDoc.getId());
 
     const renderManagerService = injector.get(IRenderManagerService);
@@ -494,6 +498,7 @@ export default function DocsEditor({
       rulerPart?.dispose();
       tableResize.dispose();
       pageChrome?.dispose();
+      pasteCleaner.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
       trackChanges.dispose();
