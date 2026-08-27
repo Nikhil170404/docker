@@ -31,13 +31,17 @@ const usage = new Map<string, UsageRecord>();
 
 const currentPeriod = () => new Date().toISOString().slice(0, 7);
 
-/** Plan a key is on. Demo keys are all on Free until billing exists. */
-function planForKey(key: string): EmbedPlan {
+/**
+ * The plan a key is on.
+ *
+ * Taken from the key record rather than guessed from its prefix: what a
+ * customer has paid for is a fact in the database, and inferring it from the
+ * shape of a string was only ever a placeholder.
+ */
+function planForId(planId: string): EmbedPlan {
   const free = embedPlans.find((p) => p.id === "embed-free");
   if (!free) throw new Error("embed-free plan missing from plans.ts");
-  return key.startsWith("dk_live_")
-    ? (embedPlans.find((p) => p.id === "embed-growth") ?? free)
-    : free;
+  return embedPlans.find((p) => p.id === planId) ?? free;
 }
 
 export interface UsageState {
@@ -55,8 +59,8 @@ export interface UsageState {
  * Count one editor load against `key` and report where that leaves it.
  * Rolls the counter over when the UTC month changes.
  */
-export function recordLoad(key: string): UsageState {
-  const plan = planForKey(key);
+export function recordLoad(key: string, planId = "embed-free"): UsageState {
+  const plan = planForId(planId);
   const period = currentPeriod();
   const record = usage.get(key);
 
@@ -113,11 +117,14 @@ export function usageHeaders(state: UsageState): Record<string, string> {
  * other outcome returns null and leaves the caller to do its work, with
  * `state` carrying the headers to attach.
  */
-export function meterRequest(key: string): {
+export function meterRequest(
+  key: string,
+  planId = "embed-free",
+): {
   state: UsageState;
   limitResponse: NextResponse | null;
 } {
-  const state = recordLoad(key);
+  const state = recordLoad(key, planId);
 
   if (!state.exhausted) return { state, limitResponse: null };
 

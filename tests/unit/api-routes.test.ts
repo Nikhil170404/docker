@@ -16,7 +16,7 @@ import {
 } from "@/app/api/v1/documents/[id]/route";
 import { __resetUsage } from "@/lib/api-usage";
 
-const KEY = "dk_test_51H7x9pQwErTyUiOpAsDfGh";
+const KEY = "dk_test_0s-MJE_zHjqhAycP8NZcAcjx83CjJRDTFWC_HMhpd_E";
 const URL_BASE = "http://localhost/api/v1/documents";
 
 function req(

@@ -7,7 +7,7 @@ import { expect, test, type Page } from "@playwright/test";
  * survives came from the server.
  */
 
-const KEY = "dk_test_51H7x9pQwErTyUiOpAsDfGh";
+const KEY = "dk_test_0s-MJE_zHjqhAycP8NZcAcjx83CjJRDTFWC_HMhpd_E";
 
 async function waitForEditor(page: Page) {
   await page.locator("canvas").first().waitFor({ timeout: 120_000 });

@@ -43,6 +43,36 @@ signed webhook at `/api/v1/billing/webhook`; the browser's success callback
 just shows a receipt. Orders are recorded before checkout opens, so a webhook
 for an order we never created is rejected even with a valid signature.
 
+## API keys
+
+Generated on the account page, shown once, and stored only as a SHA-256
+hash — a leaked database is not a set of live credentials.
+
+SHA-256 rather than bcrypt on purpose. Password hashing is slow to make
+guessing a human-chosen secret expensive; this secret is 32 random bytes, so
+slowness buys nothing and costs a lot, because the hash runs on every single
+API request. Hashing also turns authentication into one indexed equality
+lookup rather than a scan over candidate keys.
+
+Keys carry the plan their owner has paid for, so quota comes from the
+subscription rather than from whatever the client asks for. Revoked keys keep
+their row: the auth path can then answer "revoked" instead of "invalid",
+which is a materially more useful thing for a customer to read.
+
+## Database
+
+With `SUPABASE_SERVICE_ROLE_KEY` set, Postgres stores documents, API keys,
+orders and subscriptions. Apply `supabase/migrations/0001_init.sql` first.
+
+Row Level Security is on for every table, written as though the client is
+hostile — because it is reachable by anyone holding the anon key, which is
+public by design. Customers can read their own rows and write almost none of
+them: order status is decided by a signed webhook, and API key hashes are
+minted server-side, so neither is writable from a browser.
+
+Without the service-role key, everything falls back to JSON files on disk, so
+a clone with no credentials still runs.
+
 ## Document storage
 
 Documents live on disk, one JSON file per document, written atomically

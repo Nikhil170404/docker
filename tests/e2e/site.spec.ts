@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const KEY = "dk_test_51H7x9pQwErTyUiOpAsDfGh";
+const KEY = "dk_test_0s-MJE_zHjqhAycP8NZcAcjx83CjJRDTFWC_HMhpd_E";
 
 const PAGES = [
   "/",

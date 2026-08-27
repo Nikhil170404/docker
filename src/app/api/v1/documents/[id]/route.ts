@@ -13,7 +13,7 @@ const notFound = (headers: Record<string, string>) =>
   );
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const auth = authorize(req);
+  const auth = await authorize(req);
   if (!auth.ok) return auth.response;
 
   const doc = await getDocument((await params).id);
@@ -23,7 +23,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const auth = authorize(req);
+  const auth = await authorize(req);
   if (!auth.ok) return auth.response;
 
   const body = await req.json().catch(() => null);
@@ -34,7 +34,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const auth = authorize(req);
+  const auth = await authorize(req);
   if (!auth.ok) return auth.response;
 
   if (!(await deleteDocument((await params).id))) return notFound(auth.headers);

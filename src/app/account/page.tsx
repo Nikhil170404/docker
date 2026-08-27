@@ -3,6 +3,7 @@ import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import SignOutButton from "@/components/auth/SignOutButton";
+import ApiKeys from "@/components/account/ApiKeys";
 import { currentUser } from "@/lib/auth/session";
 import { isAuthConfigured } from "@/lib/auth/supabase";
 import { getSubscription, listOrders } from "@/lib/billing/subscription-store";
@@ -78,6 +79,8 @@ export default async function AccountPage() {
             </div>
           )}
         </section>
+
+        <ApiKeys />
 
         <section className="mt-6 rounded-2xl border border-border bg-surface p-7">
           <h2 className="text-lg font-medium">Payments</h2>

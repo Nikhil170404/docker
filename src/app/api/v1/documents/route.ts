@@ -3,14 +3,14 @@ import { authorize } from "@/lib/api-auth";
 import { createDocument, listDocuments } from "@/lib/server/document-repository";
 
 export async function GET(req: NextRequest) {
-  const auth = authorize(req);
+  const auth = await authorize(req);
   if (!auth.ok) return auth.response;
 
   return NextResponse.json({ data: await listDocuments() }, { headers: auth.headers });
 }
 
 export async function POST(req: NextRequest) {
-  const auth = authorize(req);
+  const auth = await authorize(req);
   if (!auth.ok) return auth.response;
 
   const body = await req.json().catch(() => null);
