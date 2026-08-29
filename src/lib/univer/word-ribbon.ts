@@ -1,4 +1,4 @@
-import { DashStyleType, UniverInstanceType } from "@univerjs/core";
+import { DashStyleType, IContextService, UniverInstanceType } from "@univerjs/core";
 import type { IAccessor, IDisposable, Injector } from "@univerjs/core";
 import {
   COLOR_PICKER_COMPONENT,
@@ -20,6 +20,7 @@ import TableSizeField from "@/components/editors/TableSizeField";
 import { whenDocAndEditorFocused } from "@univerjs/docs-ui";
 import {
   DocSelectAllCommand,
+  DocTableTabCommand,
   AlignCenterCommand,
   AlignJustifyCommand,
   AlignLeftCommand,
@@ -105,6 +106,9 @@ import {
   SplitTableCellsCommandId,
   type BorderSide,
 } from "./table-style-commands";
+
+/** Context key set by DocsEditor when the cursor is inside a table. */
+export const WORD_CURSOR_IN_TABLE_CTX = "dockaro.ctx.cursorInTable";
 
 // Word's ribbon, built out of Univer's own ribbon machinery rather than a
 // second toolbar bolted on next to it. Univer's `grid` ribbon already has
@@ -1247,6 +1251,12 @@ export function installWordRibbon(injector: Injector): WordRibbon {
       groupTitle: "ui.global-shortcut",
       ...extra,
     });
+  // Precondition: cursor is inside a table (for Tab navigation shortcuts).
+  // The context key is set by DocsEditor whenever the selection changes.
+  const isInTable = (contextService: IContextService): boolean =>
+    whenDocAndEditorFocused(contextService) &&
+    (contextService.getContextValue(WORD_CURSOR_IN_TABLE_CTX) ?? false);
+
   const shortcutDisposables = [
     // Word's Ctrl+Enter inserts a page break; Univer binds nothing to it.
     wordShortcut(InsertPageBreakCommandId, KeyCode.ENTER | MetaKeys.CTRL_COMMAND, "dockaro.layout.pageBreak"),
@@ -1263,6 +1273,30 @@ export function installWordRibbon(injector: Injector): WordRibbon {
     wordShortcut(DocSelectAllCommand.id, KeyCode.A | MetaKeys.CTRL_COMMAND, "dockaro.editing.selectAll", {
       staticParameters: { wholeDocument: true },
       priority: 100,
+    }),
+    // Tab / Shift+Tab move the cursor between table cells, exactly as Word
+    // does. Priority 200 ensures these beat any other Tab binding while the
+    // cursor is inside a table. Outside a table the precondition is false and
+    // the key reaches Univer's default handler unchanged.
+    shortcutService.registerShortcut({
+      id: DocTableTabCommand.id,
+      binding: KeyCode.TAB,
+      preconditions: isInTable,
+      staticParameters: { shift: false },
+      description: "dockaro.table.tab",
+      group: "10_global-shortcut",
+      groupTitle: "ui.global-shortcut",
+      priority: 200,
+    }),
+    shortcutService.registerShortcut({
+      id: DocTableTabCommand.id,
+      binding: KeyCode.TAB | MetaKeys.SHIFT,
+      preconditions: isInTable,
+      staticParameters: { shift: true },
+      description: "dockaro.table.tabBack",
+      group: "10_global-shortcut",
+      groupTitle: "ui.global-shortcut",
+      priority: 200,
     }),
   ];
   const componentDisposable = componentManager.register(TABLE_GRID_PICKER_COMPONENT, TableGridPicker);
