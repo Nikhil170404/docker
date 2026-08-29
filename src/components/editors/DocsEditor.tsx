@@ -11,7 +11,7 @@ import UniverPresetDocsHyperLinkEnUS from "@univerjs/preset-docs-hyper-link/loca
 import { UniverDocsThreadCommentPreset } from "@univerjs/preset-docs-thread-comment";
 import UniverPresetDocsThreadCommentEnUS from "@univerjs/preset-docs-thread-comment/locales/en-US";
 import { UniverDocsFindReplacePlugin } from "@univerjs/docs-find-replace";
-import { DocumentFlavor, ICommandService, UniverInstanceType, validateDocumentStructure } from "@univerjs/core";
+import { DocumentFlavor, ICommandService, IContextService, UniverInstanceType, validateDocumentStructure } from "@univerjs/core";
 import type { DocumentDataModel, IDocumentData, Injector, Nullable } from "@univerjs/core";
 import { IUniverInstanceService } from "@univerjs/core";
 import { DocSelectionManagerService, DocSkeletonManagerService, SetTextSelectionsOperation } from "@univerjs/docs";
@@ -32,8 +32,9 @@ import {
 import WordRuler, { type RulerGeometry } from "./WordRuler";
 import WordVerticalRuler from "./WordVerticalRuler";
 import { BuiltInUIPart, IUIPartsService } from "@univerjs/ui";
-import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
+import { installWordRibbon, RELOCATED_UNIVER_MENU_ITEMS, WORD_CURSOR_IN_TABLE_CTX, WORD_UI_LOCALE } from "@/lib/univer/word-ribbon";
 import { createTableResizeInteraction } from "@/lib/univer/table-resize";
+import { createTableMoveInteraction } from "@/lib/univer/table-move";
 import { hidePageMarginMarks } from "@/lib/univer/page-chrome";
 import { disableSlashMenu } from "@/lib/univer/slash-key";
 import { restoreFocusAfterDialogs } from "@/lib/univer/editor-focus";
@@ -196,6 +197,7 @@ export default function DocsEditor({
     };
 
     const wordRibbon = installWordRibbon(injector);
+    const contextService = injector.get(IContextService);
 
     // Word puts its ruler between the ribbon and the page. Univer renders a
     // header slot in exactly that spot, so the ruler goes in as a UI part
@@ -253,6 +255,47 @@ export default function DocsEditor({
     };
     // Word's table borders are draggable; Univer's have no such interaction.
     const tableResize = createTableResizeInteraction(injector, fDoc.getId(), () => containerRef.current);
+    // Word shows a move handle at the top-left corner of a hovered table.
+    const tableMove = createTableMoveInteraction(injector, fDoc.getId(), () => containerRef.current);
+
+    // Word paste: Microsoft Word copies rich HTML with mso-* styles that
+    // Univer's converter doesn't handle well. Intercept navigator.clipboard.read
+    // so Univer receives cleaned HTML instead.
+    const originalClipboardRead = navigator.clipboard.read.bind(navigator.clipboard);
+    navigator.clipboard.read = async (...args) => {
+      const items = await originalClipboardRead(...args);
+      const cleaned: ClipboardItem[] = [];
+      for (const item of items) {
+        if (item.types.includes("text/html")) {
+          const blob = await item.getType("text/html");
+          const html = await blob.text();
+          if (/mso-|xmlns:w=|class="?Mso/i.test(html)) {
+            const clean = html
+              // strip IE conditional comments wrapping Word XML blocks
+              .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
+              // remove <o:p> Word paragraph markers
+              .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
+              // remove Word/VML/Math namespace tags entirely
+              .replace(/<\/?w:[^>]*>/gi, "").replace(/<\/?v:[^>]*>/gi, "").replace(/<\/?m:[^>]*>/gi, "")
+              // strip mso-* properties out of style attributes while keeping real CSS
+              .replace(/(style="[^"]*?)(?:\s*mso-[^:]+:[^;";]+;?)+/gi, "$1")
+              // remove namespace declarations and Word-only attributes
+              .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
+              .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
+            const parts: Record<string, Blob | Promise<Blob>> = {
+              "text/html": new Blob([clean], { type: "text/html" }),
+            };
+            if (item.types.includes("text/plain")) {
+              parts["text/plain"] = item.getType("text/plain");
+            }
+            cleaned.push(new ClipboardItem(parts));
+            continue;
+          }
+        }
+        cleaned.push(item);
+      }
+      return cleaned;
+    };
     const pageChrome = hidePageMarginMarks(injector, fDoc.getId());
     const dialogFocus = restoreFocusAfterDialogs(injector, fDoc.getId());
 
@@ -328,7 +371,10 @@ export default function DocsEditor({
     };
     const refreshTableContext = () => {
       const inside = isCursorInsideTable();
-      if (inside !== null) wordRibbon.setTableContextActive(inside);
+      if (inside !== null) {
+        wordRibbon.setTableContextActive(inside);
+        contextService.setContextValue(WORD_CURSOR_IN_TABLE_CTX, inside);
+      }
     };
 
     const commandSubscription = commandService.onCommandExecuted((command) => {
@@ -361,6 +407,8 @@ export default function DocsEditor({
       wordRibbon.dispose();
       rulerPart.dispose();
       tableResize.dispose();
+      tableMove.dispose();
+      navigator.clipboard.read = originalClipboardRead;
       pageChrome.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
