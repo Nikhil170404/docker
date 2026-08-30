@@ -258,9 +258,49 @@ export default function DocsEditor({
     // Word shows a move handle at the top-left corner of a hovered table.
     const tableMove = createTableMoveInteraction(injector, fDoc.getId(), () => containerRef.current);
 
-    // Word paste: Microsoft Word copies rich HTML with mso-* styles that
-    // Univer's converter doesn't handle well. Intercept navigator.clipboard.read
-    // so Univer receives cleaned HTML instead.
+    // Word paste: Microsoft Word copies rich HTML with mso-* styles and
+    // explicit pixel widths that overflow Univer's A4 page. Clean it before
+    // Univer's paste handler reads it.
+    //
+    // Univer reads clipboard content through the browser's paste event via
+    // clipboardData.getData("text/html") — NOT navigator.clipboard.read —
+    // so we patch DataTransfer.prototype.getData to intercept at that layer.
+    // We also patch navigator.clipboard.read for any programmatic reads.
+    function cleanWordHtml(html: string): string {
+      let clean = html
+        .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
+        .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
+        .replace(/<\/?w:[^>]*>/gi, "").replace(/<\/?v:[^>]*>/gi, "").replace(/<\/?m:[^>]*>/gi, "")
+        .replace(/(style="[^"]*?)(?:\s*mso-[^:]+:[^;";]+;?)+/gi, "$1")
+        .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
+        .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
+      try {
+        const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
+        tmpDoc.querySelectorAll("table").forEach((table) => {
+          table.removeAttribute("width");
+          table.style.removeProperty("width");
+          table.style.setProperty("width", "100%");
+          table.style.setProperty("border-collapse", "collapse");
+        });
+        tmpDoc.querySelectorAll("td, th").forEach((cell) => {
+          (cell as HTMLElement).removeAttribute("width");
+          (cell as HTMLElement).style.removeProperty("width");
+        });
+        clean = tmpDoc.body.innerHTML;
+      } catch { /* DOMParser unavailable — keep regex-cleaned version */ }
+      return clean;
+    }
+
+    // Primary interception: paste event's clipboardData.getData()
+    const isWordHtml = /mso-|xmlns:w=|class="?Mso/i;
+    const originalGetData = DataTransfer.prototype.getData;
+    DataTransfer.prototype.getData = function (type: string): string {
+      const data = originalGetData.call(this, type) as string;
+      if (type === "text/html" && isWordHtml.test(data)) return cleanWordHtml(data);
+      return data;
+    };
+
+    // Secondary interception: programmatic clipboard reads
     const originalClipboardRead = navigator.clipboard.read.bind(navigator.clipboard);
     navigator.clipboard.read = async (...args) => {
       const items = await originalClipboardRead(...args);
@@ -269,47 +309,11 @@ export default function DocsEditor({
         if (item.types.includes("text/html")) {
           const blob = await item.getType("text/html");
           const html = await blob.text();
-          if (/mso-|xmlns:w=|class="?Mso/i.test(html)) {
-            let clean = html
-              // strip IE conditional comments wrapping Word XML blocks
-              .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
-              // remove <o:p> Word paragraph markers
-              .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
-              // remove Word/VML/Math namespace tags entirely
-              .replace(/<\/?w:[^>]*>/gi, "").replace(/<\/?v:[^>]*>/gi, "").replace(/<\/?m:[^>]*>/gi, "")
-              // strip mso-* properties out of style attributes while keeping real CSS
-              .replace(/(style="[^"]*?)(?:\s*mso-[^:]+:[^;";]+;?)+/gi, "$1")
-              // remove namespace declarations and Word-only attributes
-              .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
-              .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
-
-            // Word tables carry explicit pixel widths that overflow Univer's
-            // A4 page. Use the DOM to normalize them: tables get width:100%
-            // so Univer's layout engine handles the fit; cells lose fixed
-            // widths so columns reflow proportionally.
-            try {
-              const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
-              tmpDoc.querySelectorAll("table").forEach((table) => {
-                table.removeAttribute("width");
-                table.style.removeProperty("width");
-                table.style.setProperty("width", "100%");
-                table.style.setProperty("border-collapse", "collapse");
-              });
-              tmpDoc.querySelectorAll("td, th").forEach((cell) => {
-                (cell as HTMLElement).removeAttribute("width");
-                (cell as HTMLElement).style.removeProperty("width");
-              });
-              clean = tmpDoc.body.innerHTML;
-            } catch {
-              // DOMParser unavailable — use regex-cleaned version as-is
-            }
-
+          if (isWordHtml.test(html)) {
             const parts: Record<string, Blob | Promise<Blob>> = {
-              "text/html": new Blob([clean], { type: "text/html" }),
+              "text/html": new Blob([cleanWordHtml(html)], { type: "text/html" }),
             };
-            if (item.types.includes("text/plain")) {
-              parts["text/plain"] = item.getType("text/plain");
-            }
+            if (item.types.includes("text/plain")) parts["text/plain"] = item.getType("text/plain");
             cleaned.push(new ClipboardItem(parts));
             continue;
           }
@@ -430,6 +434,7 @@ export default function DocsEditor({
       rulerPart.dispose();
       tableResize.dispose();
       tableMove.dispose();
+      DataTransfer.prototype.getData = originalGetData;
       navigator.clipboard.read = originalClipboardRead;
       pageChrome.dispose();
       dialogFocus.dispose();
