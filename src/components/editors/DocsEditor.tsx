@@ -268,14 +268,27 @@ export default function DocsEditor({
     // We also patch navigator.clipboard.read for any programmatic reads.
     function cleanWordHtml(html: string): string {
       let clean = html
+        // Remove entire <style> block (contains mso-* class definitions)
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
         .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
         .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
         .replace(/<\/?w:[^>]*>/gi, "").replace(/<\/?v:[^>]*>/gi, "").replace(/<\/?m:[^>]*>/gi, "")
+        // Strip mso-* from double-quoted style attributes
         .replace(/(style="[^"]*?)(?:\s*mso-[^:]+:[^;";]+;?)+/gi, "$1")
+        // Strip mso-* from single-quoted style attributes (Word uses both)
+        .replace(/(style='[^']*?)(?:\s*mso-[^:]+:[^;';]+;?)+/gi, "$1")
         .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
         .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
       try {
         const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
+        // Strip any remaining mso-* properties from ALL element inline styles.
+        // DOMParser normalises quote styles, so this covers both ' and " variants.
+        tmpDoc.querySelectorAll("*").forEach((el) => {
+          const s = (el as HTMLElement).style;
+          if (!s || !s.cssText) return;
+          const cleaned = s.cssText.replace(/\s*mso-[^:]+:[^;]+;?\s*/gi, "").trim();
+          s.cssText = cleaned;
+        });
         tmpDoc.querySelectorAll("table").forEach((table) => {
           table.removeAttribute("width");
           table.style.removeProperty("width");
