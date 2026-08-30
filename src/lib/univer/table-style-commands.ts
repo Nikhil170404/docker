@@ -503,7 +503,10 @@ export const SetTableRowHeightCommand: ICommand<ISetTableRowHeightParams> = {
     const newTrHeight =
       params.mode === "auto"
         ? { val: { v: 30 }, hRule: TableRowHeightRule.AUTO }
-        : { val: { v: params.height ?? 30 }, hRule: TableRowHeightRule.EXACT };
+        // AT_LEAST: row can still grow beyond the chosen height when content
+        // overflows, matching Word's default "At least" behavior. EXACT would
+        // clip text that is taller than the specified value.
+        : { val: { v: params.height ?? 30 }, hRule: TableRowHeightRule.AT_LEAST };
 
     for (let r = range.startRow; r <= range.endRow; r++) {
       const row = table.tableRows[r];

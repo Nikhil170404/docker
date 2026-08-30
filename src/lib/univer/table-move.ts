@@ -225,8 +225,10 @@ function attachTableMove(
     const canvas = getCanvas();
     if (!canvas) return;
     const { x, y } = docToContainer(scene, pos.x, pos.y, canvas, containerRef);
-    handle.style.left = `${x - 24}px`;
-    handle.style.top = `${y - 24}px`;
+    // Clamp to at least 4px from container edges so the handle stays reachable
+    // even when the table is near the very top or left edge of the page.
+    handle.style.left = `${Math.max(4, x - 20)}px`;
+    handle.style.top = `${Math.max(4, y - 20)}px`;
     handle.hidden = false;
   }
 

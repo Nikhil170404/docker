@@ -270,7 +270,7 @@ export default function DocsEditor({
           const blob = await item.getType("text/html");
           const html = await blob.text();
           if (/mso-|xmlns:w=|class="?Mso/i.test(html)) {
-            const clean = html
+            let clean = html
               // strip IE conditional comments wrapping Word XML blocks
               .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
               // remove <o:p> Word paragraph markers
@@ -282,6 +282,28 @@ export default function DocsEditor({
               // remove namespace declarations and Word-only attributes
               .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
               .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
+
+            // Word tables carry explicit pixel widths that overflow Univer's
+            // A4 page. Use the DOM to normalize them: tables get width:100%
+            // so Univer's layout engine handles the fit; cells lose fixed
+            // widths so columns reflow proportionally.
+            try {
+              const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
+              tmpDoc.querySelectorAll("table").forEach((table) => {
+                table.removeAttribute("width");
+                table.style.removeProperty("width");
+                table.style.setProperty("width", "100%");
+                table.style.setProperty("border-collapse", "collapse");
+              });
+              tmpDoc.querySelectorAll("td, th").forEach((cell) => {
+                (cell as HTMLElement).removeAttribute("width");
+                (cell as HTMLElement).style.removeProperty("width");
+              });
+              clean = tmpDoc.body.innerHTML;
+            } catch {
+              // DOMParser unavailable — use regex-cleaned version as-is
+            }
+
             const parts: Record<string, Blob | Promise<Blob>> = {
               "text/html": new Blob([clean], { type: "text/html" }),
             };
