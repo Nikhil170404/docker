@@ -267,11 +267,179 @@ export default function DocsEditor({
     // so we patch DataTransfer.prototype.getData to intercept at that layer.
     // We also patch navigator.clipboard.read for any programmatic reads.
     function cleanWordHtml(html: string): string {
-      let clean = html
-        // Remove entire <style> block (contains mso-* class definitions)
+      // ── Phase 1: Extract class-based styles ────────────────────────────
+      // Read from the original html string (the <style> block is in <head>
+      // and won't appear in body.innerHTML after a DOMParser pass).
+      const classStyles = new Map<string, string>();
+      const styleBlockMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+      if (styleBlockMatch) {
+        const ruleRx = /\.(\w+)[^{]*\{([^}]+)\}/g;
+        let m: RegExpExecArray | null;
+        while ((m = ruleRx.exec(styleBlockMatch[1])) !== null) {
+          // Keep only standard (non-mso-*) CSS declarations
+          const props = m[2]
+            .split(";")
+            .map((p) => p.trim())
+            .filter((p) => p && !/^mso-/i.test(p))
+            .join("; ");
+          if (props) classStyles.set(m[1], props);
+        }
+      }
+
+      // ── Phase 0: Word-structure conversions (before mso-* stripping) ──
+      // DOMParser makes <![if…]>…<![endif]> conditionals available as DOM
+      // nodes (the <![…]> markers become bogus-comment nodes and the inner
+      // elements are regular DOM children). We use this window to fix
+      // structures that depend on mso-* attributes or markers that our regex
+      // phase will later strip.
+      let working = html;
+      try {
+        const p0 = new DOMParser().parseFromString(html, "text/html");
+
+        // ① Convert MsoHeading paragraphs to proper heading elements.
+        //   Univer's paste parser detects headings by tagName (H1–H5), not
+        //   by class. Without this, heading text pastes as styled plain text
+        //   and the outline / TOC commands cannot find it.
+        p0.querySelectorAll("p").forEach((p) => {
+          const m = (p as HTMLElement).className.match(/\bMsoHeading(\d)\b/i);
+          if (!m) return;
+          const level = Math.min(5, Number(m[1]));
+          const h = p0.createElement(`h${level}`);
+          [...(p as HTMLElement).attributes].forEach((a) => h.setAttribute(a.name, a.value));
+          h.innerHTML = p.innerHTML;
+          p.replaceWith(h);
+        });
+
+        // ② Convert Word list paragraphs to <ul>/<ol>/<li>.
+        //   Word uses <p class="MsoListParagraph" style="mso-list:l0 level1">
+        //   instead of <ul>/<li>. extractWordListInfo() in Univer reads the
+        //   mso-list: attribute, but our Phase 2 regex strips all mso-*
+        //   properties first. Converting to proper HTML lists here ensures
+        //   Univer's _processBeforeList() creates correctly typed list items.
+        (function convertWordLists(doc: Document) {
+          const isWordListPara = (el: Element): el is HTMLElement =>
+            el.tagName === "P" &&
+            ((el.getAttribute("style") ?? "").includes("mso-list:") ||
+              /MsoListParagraph/i.test((el as HTMLElement).className));
+
+          // Collect unique parent containers of list paragraphs
+          const containers = new Set<Element>();
+          doc.querySelectorAll("p").forEach((p) => {
+            if (isWordListPara(p)) containers.add(p.parentElement ?? doc.body);
+          });
+
+          for (const container of containers) {
+            const kids = Array.from(container.children);
+            let i = 0;
+            while (i < kids.length) {
+              if (!isWordListPara(kids[i])) { i++; continue; }
+
+              // Collect a run of consecutive list-item paragraphs
+              const group: HTMLElement[] = [];
+              while (i < kids.length && isWordListPara(kids[i])) {
+                group.push(kids[i] as HTMLElement);
+                i++;
+              }
+
+              // Detect ordered/unordered from the first item's marker span.
+              // Browsers parse <![if !supportLists]><span>1.</span><![endif]>
+              // as: bogus-comment, then the span as a regular DOM node, then
+              // another bogus-comment. The marker span has style "mso-list:Ignore".
+              const ignoreSpan = group[0].querySelector<HTMLElement>(
+                '[style*="mso-list:Ignore"]'
+              );
+              const markerText = (ignoreSpan?.textContent ?? "").replace(/\s/g, "");
+              // "1." "a." "i." etc. → ordered list; bullets or empty → unordered
+              const ordered = /^[0-9]+[.)]|^[a-zA-Z]{1,3}[.)]/.test(markerText);
+
+              const listEl = doc.createElement(ordered ? "ol" : "ul");
+
+              group.forEach((p) => {
+                // Remove marker spans before copying content to <li>
+                p.querySelectorAll('[style*="mso-list:Ignore"]').forEach((s) => s.remove());
+
+                const li = doc.createElement("li");
+                li.innerHTML = p.innerHTML;
+                // Copy class so style baking works on the <li>
+                const cls = p.getAttribute("class");
+                if (cls) li.setAttribute("class", cls);
+                // Copy non-layout, non-mso styles
+                const rawStyle = (p.getAttribute("style") ?? "")
+                  .split(";")
+                  .filter((s) => s.trim() && !/^mso-|text-indent/i.test(s.trim()))
+                  .join("; ")
+                  .trim();
+                if (rawStyle) li.setAttribute("style", rawStyle);
+                listEl.appendChild(li);
+              });
+
+              group[0].replaceWith(listEl);
+              group.slice(1).forEach((el) => el.remove());
+            }
+          }
+        })(p0);
+
+        // ③ Convert <br> inside paragraphs to paragraph splits so Univer
+        //   renders them as separate lines instead of silently dropping them.
+        p0.querySelectorAll("p").forEach((p) => {
+          const brs = p.querySelectorAll("br");
+          if (brs.length === 0) return;
+          brs.forEach((br) => {
+            // Split the paragraph at the <br>: close current <p> and open a new one
+            const newP = p0.createElement("p");
+            // Copy class / style of the parent so the new paragraph inherits formatting
+            const cls = p.getAttribute("class");
+            const sty = p.getAttribute("style");
+            if (cls) newP.setAttribute("class", cls);
+            if (sty) newP.setAttribute("style", sty);
+            // Move all remaining siblings after the <br> into the new paragraph
+            let next = br.nextSibling;
+            while (next) {
+              const tmp = next.nextSibling;
+              newP.appendChild(next);
+              next = tmp;
+            }
+            br.remove();
+            p.insertAdjacentElement("afterend", newP);
+          });
+        });
+
+        // ④ Convert CSS super/subscript spans to semantic tags so Univer's
+        //   extractNodeStyle() picks them up (it handles <sup>/<sub> tags but
+        //   not the CSS vertical-align property).
+        p0.querySelectorAll<HTMLElement>('span[style*="vertical-align"]').forEach((span) => {
+          const va = span.style.verticalAlign;
+          const tag = va === "super" ? "sup" : va === "sub" ? "sub" : null;
+          if (!tag) return;
+          const el = p0.createElement(tag);
+          [...span.attributes].forEach((a) => el.setAttribute(a.name, a.value));
+          el.style.removeProperty("vertical-align");
+          el.innerHTML = span.innerHTML;
+          span.replaceWith(el);
+        });
+
+        working = p0.body.innerHTML;
+      } catch { /* DOMParser unavailable — continue with original */ }
+
+      // ── Phase 2: Regex cleanup ──────────────────────────────────────────
+      // After Phase 0, <![if…]>…<![endif]> conditionals have been serialised
+      // back as standard HTML comments (<!--[if…]-->…<!--[endif]-->). The
+      // <img> elements they contained are now free-standing DOM nodes, so
+      // stripping the comment wrappers is safe.
+      let clean = working
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+        // Strip original-format VML conditional blocks entirely
+        .replace(/<!--\[if\s+vml\b[\s\S]*?<!\[endif\]-->/gi, "")
+        // Unwrap original-format non-vml conditionals (keep their content — images etc.)
+        .replace(/<!--\[if\s*![^\]]*\]>([\s\S]*?)<!\[endif\]-->/gi, "$1")
+        // Strip remaining original-format conditional comments
         .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
-        .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
+        // Strip comment-form wrappers left by Phase 0's DOMParser serialisation
+        .replace(/<!--\[if[^\]]*\]-->/gi, "")
+        .replace(/<!--\[endif\]-->/gi, "")
+        // Strip <o:p> tags AND their content (they add stray &nbsp; whitespace)
+        .replace(/<o:p[^>]*>[\s\S]*?<\/o:p>/gi, "")
+        .replace(/<o:p\s*\/>/gi, "")
         .replace(/<\/?w:[^>]*>/gi, "").replace(/<\/?v:[^>]*>/gi, "").replace(/<\/?m:[^>]*>/gi, "")
         // Strip mso-* from double-quoted style attributes
         .replace(/(style="[^"]*?)(?:\s*mso-[^:]+:[^;";]+;?)+/gi, "$1")
@@ -279,26 +447,97 @@ export default function DocsEditor({
         .replace(/(style='[^']*?)(?:\s*mso-[^:]+:[^;';]+;?)+/gi, "$1")
         .replace(/\s+xmlns[^=]*="[^"]*"/gi, "")
         .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
+
+      // ── Phase 3: DOMParser normalisation ───────────────────────────────
       try {
         const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
+
+        // Bake class-based styles into inline styles (inline styles win over class)
+        if (classStyles.size > 0) {
+          tmpDoc.querySelectorAll("[class]").forEach((el) => {
+            const classes = (el as HTMLElement).className.split(/\s+/);
+            const fromClass = classes
+              .filter((c) => classStyles.has(c))
+              .map((c) => classStyles.get(c)!)
+              .join("; ");
+            if (fromClass) {
+              const existing = (el as HTMLElement).style.cssText;
+              // class props go first so inline props override them
+              (el as HTMLElement).style.cssText = fromClass + (existing ? "; " + existing : "");
+            }
+          });
+        }
+
         // Strip any remaining mso-* properties from ALL element inline styles.
-        // DOMParser normalises quote styles, so this covers both ' and " variants.
         tmpDoc.querySelectorAll("*").forEach((el) => {
           const s = (el as HTMLElement).style;
-          if (!s || !s.cssText) return;
-          const cleaned = s.cssText.replace(/\s*mso-[^:]+:[^;]+;?\s*/gi, "").trim();
-          s.cssText = cleaned;
+          if (!s?.cssText) return;
+          s.cssText = s.cssText.replace(/\s*mso-[^:]+:[^;]+;?\s*/gi, "").trim();
         });
+
+        // Strip explicit <tr> height so Univer uses TableRowHeightRule.AT_LEAST
+        // (auto-grow) instead of EXACT, which clips text when content overflows.
+        tmpDoc.querySelectorAll("tr").forEach((tr) => {
+          tr.removeAttribute("height");
+          (tr as HTMLElement).style.removeProperty("height");
+        });
+
+        // Normalize table widths: table → 100%, cells → proportional px.
+        // IMPORTANT: Univer's readCssSize() only recognises px/pt/in/cm/mm —
+        // percentage widths return undefined and fall back to equal-width columns.
+        // We scale cell widths to Univer's DEFAULT_TABLE_WIDTH (660 px) so that
+        // proportions are preserved and the values are readable by the parser.
         tmpDoc.querySelectorAll("table").forEach((table) => {
+          const totalW =
+            parseFloat((table as HTMLElement).style.width) ||
+            parseFloat(table.getAttribute("width") || "") || 0;
           table.removeAttribute("width");
-          table.style.removeProperty("width");
-          table.style.setProperty("width", "100%");
-          table.style.setProperty("border-collapse", "collapse");
+          (table as HTMLElement).style.removeProperty("width");
+          (table as HTMLElement).style.setProperty("width", "100%");
+          (table as HTMLElement).style.setProperty("border-collapse", "collapse");
+
+          // Word marks borderless tables with border="0". We need to tell
+          // Univer's HTML parser (nt() function) to produce zero-width borders
+          // rather than leaving the border property absent. When absent, Univer's
+          // renderer falls back to its default grey line. border:none is treated
+          // as absent (nt() returns undefined); "0px solid #000000" produces
+          // { color, width: 0 } which the renderer correctly skips.
+          const isBorderless = table.getAttribute("border") === "0";
+
+          const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
+          cells.forEach((cell) => {
+            const cellW =
+              parseFloat(cell.style.width) ||
+              parseFloat(cell.getAttribute("width") || "") || 0;
+            cell.removeAttribute("width");
+            cell.style.removeProperty("width");
+            // Scale to Univer's 660 px content width (px is a recognised unit;
+            // % is NOT recognised by readCssSize and produces equal-width columns)
+            if (totalW > 0 && cellW > 0) {
+              const scaledPx = Math.round((cellW / totalW) * 660);
+              cell.style.setProperty("width", `${scaledPx}px`);
+              cell.setAttribute("width", String(scaledPx));
+            }
+            // For borderless Word tables: set 0-width borders on all four sides.
+            // "border:none" makes nt() return undefined → Univer draws grey fallback.
+            // "0px solid #000" makes nt() return { width: 0 } → renderer skips it.
+            if (isBorderless && !cell.style.borderTop) {
+              cell.style.setProperty("border-top",    "0px solid #000000");
+              cell.style.setProperty("border-right",  "0px solid #000000");
+              cell.style.setProperty("border-bottom", "0px solid #000000");
+              cell.style.setProperty("border-left",   "0px solid #000000");
+            }
+          });
         });
-        tmpDoc.querySelectorAll("td, th").forEach((cell) => {
-          (cell as HTMLElement).removeAttribute("width");
-          (cell as HTMLElement).style.removeProperty("width");
+
+        // Add UniverNormal class to <p> elements so Univer's UniverPastePlugin
+        // fires its afterProcessRules for them and applies paragraph-level CSS
+        // (text-align, line-height, margin-top, margin-bottom) — properties
+        // that the default _appendParagraph path does not read.
+        tmpDoc.querySelectorAll("p").forEach((p) => {
+          (p as HTMLElement).className = ((p as HTMLElement).className + " UniverNormal").trim();
         });
+
         clean = tmpDoc.body.innerHTML;
       } catch { /* DOMParser unavailable — keep regex-cleaned version */ }
       return clean;
