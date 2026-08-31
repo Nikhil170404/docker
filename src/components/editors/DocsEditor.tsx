@@ -267,8 +267,27 @@ export default function DocsEditor({
     // so we patch DataTransfer.prototype.getData to intercept at that layer.
     // We also patch navigator.clipboard.read for any programmatic reads.
     function cleanWordHtml(html: string): string {
+      // Extract class-based styles from the <style> block so we can bake them
+      // into inline styles before the block is removed. Word defines fonts,
+      // sizes and spacing via .MsoNormal / .MsoHeading* etc.; without this
+      // step those paragraphs fall back to browser defaults.
+      const classStyles = new Map<string, string>();
+      const styleBlockMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+      if (styleBlockMatch) {
+        const ruleRx = /\.(\w+)[^{]*\{([^}]+)\}/g;
+        let m: RegExpExecArray | null;
+        while ((m = ruleRx.exec(styleBlockMatch[1])) !== null) {
+          // Keep only standard (non-mso-*) CSS declarations
+          const props = m[2]
+            .split(";")
+            .map((p) => p.trim())
+            .filter((p) => p && !/^mso-/i.test(p))
+            .join("; ");
+          if (props) classStyles.set(m[1], props);
+        }
+      }
+
       let clean = html
-        // Remove entire <style> block (contains mso-* class definitions)
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
         .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")
         .replace(/<o:p\s*\/?>/gi, "").replace(/<\/o:p>/gi, "")
@@ -281,24 +300,54 @@ export default function DocsEditor({
         .replace(/\s+(?:v|o|w):\w+="[^"]*"/gi, "");
       try {
         const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
+
+        // Bake class-based styles into inline styles (inline styles win over class)
+        if (classStyles.size > 0) {
+          tmpDoc.querySelectorAll("[class]").forEach((el) => {
+            const classes = (el as HTMLElement).className.split(/\s+/);
+            const fromClass = classes
+              .filter((c) => classStyles.has(c))
+              .map((c) => classStyles.get(c)!)
+              .join("; ");
+            if (fromClass) {
+              const existing = (el as HTMLElement).style.cssText;
+              // class props go first so inline props override them
+              (el as HTMLElement).style.cssText = fromClass + (existing ? "; " + existing : "");
+            }
+          });
+        }
+
         // Strip any remaining mso-* properties from ALL element inline styles.
-        // DOMParser normalises quote styles, so this covers both ' and " variants.
         tmpDoc.querySelectorAll("*").forEach((el) => {
           const s = (el as HTMLElement).style;
-          if (!s || !s.cssText) return;
-          const cleaned = s.cssText.replace(/\s*mso-[^:]+:[^;]+;?\s*/gi, "").trim();
-          s.cssText = cleaned;
+          if (!s?.cssText) return;
+          s.cssText = s.cssText.replace(/\s*mso-[^:]+:[^;]+;?\s*/gi, "").trim();
         });
+
+        // Normalize table widths: table → 100%, cells → proportional %
         tmpDoc.querySelectorAll("table").forEach((table) => {
+          const totalW =
+            parseFloat((table as HTMLElement).style.width) ||
+            parseFloat(table.getAttribute("width") || "") || 0;
           table.removeAttribute("width");
-          table.style.removeProperty("width");
-          table.style.setProperty("width", "100%");
-          table.style.setProperty("border-collapse", "collapse");
+          (table as HTMLElement).style.removeProperty("width");
+          (table as HTMLElement).style.setProperty("width", "100%");
+          (table as HTMLElement).style.setProperty("border-collapse", "collapse");
+
+          const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
+          cells.forEach((cell) => {
+            const cellW =
+              parseFloat(cell.style.width) ||
+              parseFloat(cell.getAttribute("width") || "") || 0;
+            cell.removeAttribute("width");
+            cell.style.removeProperty("width");
+            // Preserve relative column proportions when total width is known
+            if (totalW > 0 && cellW > 0) {
+              cell.style.setProperty("width", `${Math.round((cellW / totalW) * 100)}%`);
+            }
+          });
         });
-        tmpDoc.querySelectorAll("td, th").forEach((cell) => {
-          (cell as HTMLElement).removeAttribute("width");
-          (cell as HTMLElement).style.removeProperty("width");
-        });
+
         clean = tmpDoc.body.innerHTML;
       } catch { /* DOMParser unavailable — keep regex-cleaned version */ }
       return clean;
