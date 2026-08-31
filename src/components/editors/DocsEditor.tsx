@@ -334,12 +334,13 @@ export default function DocsEditor({
           (table as HTMLElement).style.setProperty("width", "100%");
           (table as HTMLElement).style.setProperty("border-collapse", "collapse");
 
-          // If Word marked the table as borderless, force cells to border:none
-          // so Univer's default cell-border CSS doesn't override it.
-          const isBorderless =
-            table.getAttribute("border") === "0" ||
-            (table as HTMLElement).style.borderTopStyle === "none" ||
-            !(table as HTMLElement).style.border;
+          // Word marks borderless tables with border="0". We need to tell
+          // Univer's HTML parser (nt() function) to produce zero-width borders
+          // rather than leaving the border property absent. When absent, Univer's
+          // renderer falls back to its default grey line. border:none is treated
+          // as absent (nt() returns undefined); "0px solid #000000" produces
+          // { color, width: 0 } which the renderer correctly skips.
+          const isBorderless = table.getAttribute("border") === "0";
 
           const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
           cells.forEach((cell) => {
@@ -352,11 +353,14 @@ export default function DocsEditor({
             if (totalW > 0 && cellW > 0) {
               cell.style.setProperty("width", `${Math.round((cellW / totalW) * 100)}%`);
             }
-            // Propagate borderless flag so Univer doesn't draw default borders
-            if (isBorderless) {
-              if (!cell.style.border && !cell.style.borderTop) {
-                cell.style.setProperty("border", "none");
-              }
+            // For borderless Word tables: set 0-width borders on all four sides.
+            // "border:none" makes nt() return undefined → Univer draws grey fallback.
+            // "0px solid #000" makes nt() return { width: 0 } → renderer skips it.
+            if (isBorderless && !cell.style.borderTop) {
+              cell.style.setProperty("border-top",    "0px solid #000000");
+              cell.style.setProperty("border-right",  "0px solid #000000");
+              cell.style.setProperty("border-bottom", "0px solid #000000");
+              cell.style.setProperty("border-left",   "0px solid #000000");
             }
           });
         });
