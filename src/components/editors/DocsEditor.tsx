@@ -334,6 +334,13 @@ export default function DocsEditor({
           (table as HTMLElement).style.setProperty("width", "100%");
           (table as HTMLElement).style.setProperty("border-collapse", "collapse");
 
+          // If Word marked the table as borderless, force cells to border:none
+          // so Univer's default cell-border CSS doesn't override it.
+          const isBorderless =
+            table.getAttribute("border") === "0" ||
+            (table as HTMLElement).style.borderTopStyle === "none" ||
+            !(table as HTMLElement).style.border;
+
           const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
           cells.forEach((cell) => {
             const cellW =
@@ -344,6 +351,12 @@ export default function DocsEditor({
             // Preserve relative column proportions when total width is known
             if (totalW > 0 && cellW > 0) {
               cell.style.setProperty("width", `${Math.round((cellW / totalW) * 100)}%`);
+            }
+            // Propagate borderless flag so Univer doesn't draw default borders
+            if (isBorderless) {
+              if (!cell.style.border && !cell.style.borderTop) {
+                cell.style.setProperty("border", "none");
+              }
             }
           });
         });
