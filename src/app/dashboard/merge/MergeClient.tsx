@@ -4,8 +4,9 @@ import { useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  LogOut, Upload, Download, Send, Mail, Settings2, CheckCircle2,
-  XCircle, Loader2, Eye, FileText, ChevronDown, ChevronUp, AlertTriangle,
+  LogOut, Upload, Download, Send, Settings2, CheckCircle2,
+  XCircle, Loader2, Eye, FileText, ChevronDown, ChevronUp,
+  AlertTriangle, ShieldCheck, Zap, Info, Mail,
 } from "lucide-react";
 import type { SessionUser } from "@/lib/auth";
 import { jsPDF } from "jspdf";
@@ -18,10 +19,14 @@ interface Props {
   initialContent: string | null;
   initialFields: string[];
 }
-interface SmtpConfig {
-  host: string; port: number; secure: boolean; user: string; pass: string; from: string;
-}
-interface SendResult { email: string; status: "pending" | "sending" | "ok" | "error"; error?: string; }
+
+type ProviderType = "resend" | "sendgrid" | "smtp";
+interface ResendCfg { type: "resend"; apiKey: string; domain: string }
+interface SendGridCfg { type: "sendgrid"; apiKey: string }
+interface SmtpCfg { type: "smtp"; host: string; port: number; secure: boolean; user: string; pass: string; from: string }
+type ProviderCfg = ResendCfg | SendGridCfg | SmtpCfg;
+
+interface SendResult { email: string; status: "pending" | "sending" | "ok" | "skipped" | "error"; error?: string }
 
 const NAV_TABS = [
   { href: "/dashboard", label: "Documents" },
@@ -29,104 +34,110 @@ const NAV_TABS = [
   { href: "/dashboard/merge", label: "Mail Merge" },
 ];
 
-const DEFAULT_SMTP: SmtpConfig = { host: "", port: 587, secure: false, user: "", pass: "", from: "" };
-const LS_SMTP = "dockaro:smtp-config";
+const LS_PROVIDER = "dockaro:email-provider";
+
+const PROVIDER_INFO = {
+  resend: {
+    label: "Resend",
+    badge: "Recommended",
+    badgeColor: "bg-green-500/15 text-green-400",
+    desc: "Best deliverability. Free 3,000/month. Scales to millions. Custom domain required.",
+    docsUrl: "https://resend.com/docs",
+    icon: "⚡",
+  },
+  sendgrid: {
+    label: "SendGrid",
+    badge: "Enterprise",
+    badgeColor: "bg-blue-500/15 text-blue-400",
+    desc: "Industry standard for bulk email. Free 100/day, paid plans for volume.",
+    docsUrl: "https://docs.sendgrid.com",
+    icon: "📧",
+  },
+  smtp: {
+    label: "SMTP (own server)",
+    badge: "Small lists only",
+    badgeColor: "bg-amber-500/15 text-amber-400",
+    desc: "Use your own mail server. Gmail/Outlook go to spam above ~500/day.",
+    docsUrl: "",
+    icon: "🖥️",
+  },
+};
+
+// Batch config: send N per batch with a delay between batches
+const BATCH_SIZE = 50;
+const BATCH_DELAY_MS = 2000; // 2s between batches → ~1500/hour well within limits
 
 function parseCSV(text: string): Record<string, string>[] {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) return [];
   const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
-  return lines.slice(1)
-    .filter((l) => l.trim())
-    .map((line) => {
-      const vals = line.split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
-      const row: Record<string, string> = {};
-      headers.forEach((h, i) => { row[h] = vals[i] ?? ""; });
-      return row;
-    });
+  return lines.slice(1).filter((l) => l.trim()).map((line) => {
+    const vals = line.split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => { row[h] = vals[i] ?? ""; });
+    return row;
+  });
 }
 
 function applyMerge(template: string, row: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, k) => row[k] ?? `{{${k}}}`);
 }
 
-/** Extract plain text from Univer IDocumentData JSON */
 function extractDocText(contentJson: string | null): string {
   if (!contentJson) return "";
   try {
     const data = JSON.parse(contentJson);
     const stream: string = data?.body?.dataStream ?? "";
-    return stream
-      .replace(/\r/g, "\n")
-      .replace(/[\x00-\x0c\x0e-\x1f]/g, "")
-      .replace(/\t/g, "  ")
-      .trim();
-  } catch {
-    return contentJson;
-  }
+    return stream.replace(/\r/g, "\n").replace(/[\x00-\x0c\x0e-\x1f]/g, "").replace(/\t/g, "  ").trim();
+  } catch { return contentJson; }
 }
 
-/** Generate a professional PDF from merged text */
-function generatePdf(mergedText: string, recipientName: string, senderName: string): string {
+function generatePdfBase64(mergedText: string, senderName: string): string {
   const doc = new jsPDF({ unit: "mm", format: "a4" });
   const margin = 20;
   const pageW = doc.internal.pageSize.getWidth();
   const maxW = pageW - margin * 2;
 
-  // Header bar
   doc.setFillColor(59, 130, 246);
-  doc.rect(0, 0, pageW, 16, "F");
+  doc.rect(0, 0, pageW, 18, "F");
   doc.setTextColor(255, 255, 255);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(11);
-  doc.text(senderName, margin, 11);
-
-  // Date top right
+  doc.setFontSize(12);
+  doc.text(senderName, margin, 12);
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
-  doc.text(new Date().toLocaleDateString("en-IN", { year: "numeric", month: "long", day: "numeric" }), pageW - margin, 11, { align: "right" });
+  doc.text(new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }), pageW - margin, 12, { align: "right" });
 
-  // Body text
   doc.setTextColor(30, 30, 30);
   doc.setFont("helvetica", "normal");
   doc.setFontSize(11);
-
-  let y = 30;
-  const lines = mergedText.split("\n");
-  for (const rawLine of lines) {
+  let y = 32;
+  for (const rawLine of mergedText.split("\n")) {
     const wrapped = doc.splitTextToSize(rawLine || " ", maxW) as string[];
     for (const wl of wrapped) {
-      if (y > 270) { doc.addPage(); y = 20; }
+      if (y > 272) { doc.addPage(); y = 20; }
       doc.text(wl, margin, y);
       y += 6;
     }
-    if (!rawLine.trim()) y += 2; // blank line extra spacing
+    if (!rawLine.trim()) y += 2;
   }
 
-  // Footer
   const footerY = doc.internal.pageSize.getHeight() - 10;
-  doc.setDrawColor(200, 200, 200);
+  doc.setDrawColor(220, 220, 220);
   doc.line(margin, footerY - 4, pageW - margin, footerY - 4);
   doc.setFontSize(8);
-  doc.setTextColor(150, 150, 150);
+  doc.setTextColor(160, 160, 160);
   doc.text("Generated by DocKaro · dockaro.com", margin, footerY);
-  doc.text(`Page 1`, pageW - margin, footerY, { align: "right" });
 
-  return doc.output("datauristring").split(",")[1]; // base64
+  return doc.output("datauristring").split(",")[1];
 }
 
-function buildEmailHtml(mergedText: string, fromName: string): string {
-  const lines = mergedText.split("\n");
-  const bodyHtml = lines
-    .map((l) => l.trim() ? `<p style="margin:0 0 8px">${l.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>` : `<br>`)
-    .join("\n");
-  return `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:640px;margin:auto;padding:24px">
-<div style="border-top:4px solid #3b82f6;padding-top:20px">
-${bodyHtml}
-</div>
-<hr style="margin:28px 0;border:none;border-top:1px solid #e5e7eb">
-<p style="font-size:11px;color:#9ca3af">Sent via <a href="https://dockaro.com" style="color:#3b82f6">DocKaro</a> by ${fromName.replace(/</g,"&lt;")}</p>
-</body></html>`;
+function loadProvider(): ProviderCfg {
+  try {
+    const saved = localStorage.getItem(LS_PROVIDER);
+    if (saved) return JSON.parse(saved) as ProviderCfg;
+  } catch {}
+  return { type: "resend", apiKey: "", domain: "" };
 }
 
 export default function MergeClient({ session, templates, selectedTemplateId, initialContent, initialFields }: Props) {
@@ -138,24 +149,47 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
   const [nameCol, setNameCol] = useState("");
   const [subject, setSubject] = useState("Important document for {{first_name}}");
   const [fromName, setFromName] = useState(session.name);
-  const [showSmtp, setShowSmtp] = useState(false);
-  const [smtpCfg, setSmtpCfg] = useState<SmtpConfig>(() => {
-    try { return JSON.parse(localStorage.getItem(LS_SMTP) ?? "{}") as SmtpConfig || DEFAULT_SMTP; } catch { return DEFAULT_SMTP; }
+  const [fromEmail, setFromEmail] = useState("");
+  const [attachPdf, setAttachPdf] = useState(true);
+
+  const [providerType, setProviderType] = useState<ProviderType>(() => loadProvider().type as ProviderType);
+  const [resendCfg, setResendCfg] = useState<Omit<ResendCfg, "type">>(() => {
+    const p = loadProvider(); return p.type === "resend" ? { apiKey: p.apiKey, domain: p.domain } : { apiKey: "", domain: "" };
   });
-  const [smtpStatus, setSmtpStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
-  const [smtpError, setSmtpError] = useState("");
-  const [preview, setPreview] = useState<{ text: string; html: string } | null>(null);
+  const [sgCfg, setSgCfg] = useState<Omit<SendGridCfg, "type">>(() => {
+    const p = loadProvider(); return p.type === "sendgrid" ? { apiKey: p.apiKey } : { apiKey: "" };
+  });
+  const [smtpCfg, setSmtpCfg] = useState<Omit<SmtpCfg, "type">>(() => {
+    const p = loadProvider();
+    return p.type === "smtp" ? { host: p.host, port: p.port, secure: p.secure, user: p.user, pass: p.pass, from: p.from }
+      : { host: "", port: 587, secure: false, user: "", pass: "", from: "" };
+  });
+  const [showProviderCfg, setShowProviderCfg] = useState(false);
+
+  const [preview, setPreview] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [results, setResults] = useState<SendResult[]>([]);
-  const [showResults, setShowResults] = useState(false);
+  const [progress, setProgress] = useState(0);
   const abortRef = useRef(false);
 
   const currentTemplate = templates.find((t) => t.id === selectedId);
   const contentText = extractDocText(initialContent);
+  const providerInfo = PROVIDER_INFO[providerType];
 
-  function saveSmtp(cfg: SmtpConfig) {
-    setSmtpCfg(cfg);
-    try { localStorage.setItem(LS_SMTP, JSON.stringify(cfg)); } catch {}
+  function buildProvider(): ProviderCfg {
+    if (providerType === "resend") return { type: "resend", ...resendCfg };
+    if (providerType === "sendgrid") return { type: "sendgrid", ...sgCfg };
+    return { type: "smtp", ...smtpCfg };
+  }
+
+  function saveProvider(cfg: ProviderCfg) {
+    try { localStorage.setItem(LS_PROVIDER, JSON.stringify(cfg)); } catch {}
+  }
+
+  function isProviderReady(): boolean {
+    if (providerType === "resend") return !!(resendCfg.apiKey && resendCfg.domain);
+    if (providerType === "sendgrid") return !!sgCfg.apiKey;
+    return !!(smtpCfg.host && smtpCfg.user && smtpCfg.pass);
   }
 
   async function logout() {
@@ -168,16 +202,12 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      const rows = parseCSV(text);
+      const rows = parseCSV(ev.target?.result as string);
       setCsvRows(rows);
       const headers = rows.length ? Object.keys(rows[0]) : [];
       setCsvHeaders(headers);
-      // Auto-detect email column
-      const emailGuess = headers.find((h) => /^email/i.test(h)) ?? headers.find((h) => /email/i.test(h)) ?? "";
-      const nameGuess = headers.find((h) => /^(name|full.?name|first.?name)/i.test(h)) ?? "";
-      setEmailCol(emailGuess);
-      setNameCol(nameGuess);
+      setEmailCol(headers.find((h) => /^email/i.test(h)) ?? headers.find((h) => /email/i.test(h)) ?? "");
+      setNameCol(headers.find((h) => /^(name|full.?name|first.?name)/i.test(h)) ?? "");
     };
     reader.readAsText(file);
   }
@@ -191,89 +221,101 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
   function runPreview() {
     if (!csvRows.length) return;
     const row = csvRows[0];
-    const text = applyMerge(contentText || `Dear {{first_name}},\n\nThank you for your interest.\n\nRegards,\n${fromName}`, row);
-    const html = buildEmailHtml(text, fromName);
-    setPreview({ text, html });
-  }
-
-  async function testSmtp() {
-    setSmtpStatus("testing"); setSmtpError("");
-    const res = await fetch("/api/v1/merge/test-smtp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ smtp: smtpCfg }),
-    });
-    const data = await res.json();
-    if (res.ok) { setSmtpStatus("ok"); }
-    else { setSmtpStatus("error"); setSmtpError(data.error ?? "Connection failed"); }
+    const tpl = contentText || `Dear {{first_name}},\n\nThank you for your enquiry.\n\nRegards,\n${fromName}`;
+    setPreview(applyMerge(tpl, row));
   }
 
   function downloadAllPdfs() {
-    if (!csvRows.length) return;
-    const templateText = contentText || `Dear {{first_name}},\n\nThank you.\n\nRegards,\n${fromName}`;
+    const tpl = contentText || `Dear {{first_name}},\n\nThank you.\n\nRegards,\n${fromName}`;
     csvRows.forEach((row, i) => {
-      const merged = applyMerge(templateText, row);
-      const base64 = generatePdf(merged, row[nameCol] || `Recipient ${i + 1}`, fromName);
-      const link = document.createElement("a");
-      link.href = `data:application/pdf;base64,${base64}`;
-      link.download = `${currentTemplate?.title ?? "document"}_${i + 1}.pdf`;
-      link.click();
+      const merged = applyMerge(tpl, row);
+      const b64 = generatePdfBase64(merged, fromName);
+      const a = document.createElement("a");
+      a.href = `data:application/pdf;base64,${b64}`;
+      a.download = `${currentTemplate?.title ?? "document"}_${i + 1}.pdf`;
+      a.click();
     });
   }
 
   const sendAll = useCallback(async () => {
-    if (!csvRows.length || !emailCol || !smtpCfg.host || !smtpCfg.user) return;
+    if (!csvRows.length || !emailCol) return;
     abortRef.current = false;
     setSending(true);
-    setShowResults(true);
-    const templateText = contentText || `Dear {{first_name}},\n\nThank you.\n\nRegards,\n${fromName}`;
+    setProgress(0);
+    const tpl = contentText || `Dear {{first_name}},\n\nThank you.\n\nRegards,\n${fromName}`;
+    const provider = buildProvider();
+    saveProvider(provider);
     const initial: SendResult[] = csvRows.map((row) => ({ email: row[emailCol] ?? "(no email)", status: "pending" }));
     setResults(initial);
 
-    for (let i = 0; i < csvRows.length; i++) {
+    let done = 0;
+    for (let b = 0; b < csvRows.length; b += BATCH_SIZE) {
       if (abortRef.current) break;
-      const row = csvRows[i];
-      const email = row[emailCol]?.trim();
-      if (!email) {
-        setResults((r) => { const n = [...r]; n[i] = { email: "(empty)", status: "error", error: "No email address" }; return n; });
-        continue;
-      }
-      setResults((r) => { const n = [...r]; n[i] = { ...n[i], status: "sending" }; return n; });
+      const batch = csvRows.slice(b, b + BATCH_SIZE);
 
-      const mergedText = applyMerge(templateText, row);
-      const pdfBase64 = generatePdf(mergedText, row[nameCol] || "", fromName);
-      const mergedSubject = applyMerge(subject, row);
-      const bodyHtml = buildEmailHtml(mergedText, fromName);
-      const filename = `${currentTemplate?.title ?? "document"}.pdf`;
-
-      try {
-        const res = await fetch("/api/v1/merge/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ to: email, toName: row[nameCol] || "", subject: mergedSubject, bodyHtml, fromName, pdfBase64, pdfFilename: filename, smtp: smtpCfg }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          setResults((r) => { const n = [...r]; n[i] = { email, status: "ok" }; return n; });
-        } else {
-          setResults((r) => { const n = [...r]; n[i] = { email, status: "error", error: data.error }; return n; });
+      await Promise.all(batch.map(async (row, bi) => {
+        const i = b + bi;
+        const email = row[emailCol]?.trim();
+        if (!email) {
+          setResults((r) => { const n = [...r]; n[i] = { email: "(empty)", status: "error", error: "No email" }; return n; });
+          done++; setProgress(Math.round((done / csvRows.length) * 100));
+          return;
         }
-      } catch (err) {
-        setResults((r) => { const n = [...r]; n[i] = { email, status: "error", error: (err as Error).message }; return n; });
+        setResults((r) => { const n = [...r]; n[i] = { ...n[i], status: "sending" }; return n; });
+
+        const mergedText = applyMerge(tpl, row);
+        const mergedSubject = applyMerge(subject, row);
+        const pdfBase64 = attachPdf ? generatePdfBase64(mergedText, fromName) : undefined;
+
+        try {
+          const res = await fetch("/api/v1/merge/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              provider,
+              fromName,
+              fromEmail: fromEmail || undefined,
+              to: email,
+              toName: row[nameCol] || undefined,
+              subject: mergedSubject,
+              mergedText,
+              recipientEmail: email,
+              recipientName: row[nameCol] || undefined,
+              pdfBase64,
+              pdfFilename: `${currentTemplate?.title ?? "document"}.pdf`,
+              templateId: selectedId || undefined,
+            }),
+          });
+          const data = await res.json();
+          if (data.skipped) {
+            setResults((r) => { const n = [...r]; n[i] = { email, status: "skipped" }; return n; });
+          } else if (res.ok) {
+            setResults((r) => { const n = [...r]; n[i] = { email, status: "ok" }; return n; });
+          } else {
+            setResults((r) => { const n = [...r]; n[i] = { email, status: "error", error: data.error }; return n; });
+          }
+        } catch (err) {
+          setResults((r) => { const n = [...r]; n[i] = { email, status: "error", error: (err as Error).message }; return n; });
+        }
+        done++; setProgress(Math.round((done / csvRows.length) * 100));
+      }));
+
+      // Delay between batches to respect rate limits
+      if (b + BATCH_SIZE < csvRows.length && !abortRef.current) {
+        await new Promise((r) => setTimeout(r, BATCH_DELAY_MS));
       }
-      // small delay to avoid rate limits
-      if (i < csvRows.length - 1) await new Promise((r) => setTimeout(r, 400));
     }
     setSending(false);
-  }, [csvRows, emailCol, nameCol, subject, fromName, contentText, smtpCfg, currentTemplate]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [csvRows, emailCol, nameCol, subject, fromName, fromEmail, contentText, attachPdf, selectedId, currentTemplate?.title, providerType, resendCfg, sgCfg, smtpCfg]);
 
   const sentOk = results.filter((r) => r.status === "ok").length;
   const sentFail = results.filter((r) => r.status === "error").length;
-  const smtpReady = smtpCfg.host && smtpCfg.user && smtpCfg.pass;
+  const sentSkip = results.filter((r) => r.status === "skipped").length;
+  const providerReady = isProviderReady();
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
       <header className="sticky top-0 z-40 border-b border-border/80 bg-background/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight text-foreground">
@@ -297,15 +339,32 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
       </header>
 
       <main className="mx-auto max-w-4xl px-6 py-10">
-        <div className="mb-8">
-          <h1 className="text-2xl font-semibold text-foreground">Mail Merge & PDF Sender</h1>
-          <p className="mt-1 text-sm text-muted">Generate personalised PDFs and send them directly to each recipient's inbox</p>
+        <div className="mb-6">
+          <h1 className="text-2xl font-semibold text-foreground">Mail Merge & Bulk PDF Sender</h1>
+          <p className="mt-1 text-sm text-muted">Generate personalised PDFs and send them to thousands of recipients with inbox delivery</p>
+        </div>
+
+        {/* Deliverability notice */}
+        <div className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+          <div className="flex items-start gap-3">
+            <ShieldCheck size={16} className="mt-0.5 shrink-0 text-blue-400" />
+            <div className="text-xs text-blue-300/90 space-y-1">
+              <p className="font-semibold text-blue-300">Inbox delivery at scale — what matters</p>
+              <ul className="space-y-0.5 text-blue-300/70 list-disc pl-4">
+                <li><strong className="text-blue-300">Use Resend or SendGrid</strong> — not Gmail/Outlook. They handle IP warming, feedback loops, bounce handling automatically.</li>
+                <li><strong className="text-blue-300">Verify your domain</strong> — add SPF, DKIM, DMARC DNS records. Resend guides you through this in minutes.</li>
+                <li><strong className="text-blue-300">Send only to opted-in lists</strong> — cold emails to bought lists get you blacklisted fast. Engagement = inbox, complaints = spam folder.</li>
+                <li><strong className="text-blue-300">Unsubscribe link</strong> — DocKaro adds it to every email automatically. Required by law (CAN-SPAM / GDPR).</li>
+                <li>We batch {BATCH_SIZE}/batch with {BATCH_DELAY_MS / 1000}s delays to stay within all provider rate limits.</li>
+              </ul>
+            </div>
+          </div>
         </div>
 
         {/* Step 1: Template */}
         <Step number={1} title="Choose a template">
           {templates.length === 0 ? (
-            <p className="text-sm text-muted">No templates yet. <Link href="/dashboard/templates" className="text-accent hover:underline">Create one first</Link>.</p>
+            <p className="text-sm text-muted">No templates. <Link href="/dashboard/templates" className="text-accent hover:underline">Create one first</Link>.</p>
           ) : (
             <>
               <select value={selectedId} onChange={(e) => handleSelectTemplate(e.target.value)}
@@ -314,11 +373,9 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
                 {templates.map((t) => <option key={t.id} value={t.id}>{t.title}{t.description ? ` — ${t.description}` : ""}</option>)}
               </select>
               {currentTemplate?.fields.length ? (
-                <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
-                  <span className="text-muted">Merge fields:</span>
-                  {currentTemplate.fields.map((f) => (
-                    <code key={f} className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{`{{${f}}}`}</code>
-                  ))}
+                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="text-muted">Fields:</span>
+                  {currentTemplate.fields.map((f) => <code key={f} className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{`{{${f}}}`}</code>)}
                 </div>
               ) : null}
             </>
@@ -326,18 +383,18 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
         </Step>
 
         {/* Step 2: CSV */}
-        <Step number={2} title="Upload recipient CSV">
+        <Step number={2} title="Upload recipient list (CSV)">
           <label className="flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border px-6 py-8 text-center transition-colors hover:border-accent/50">
             <Upload size={20} className="text-muted" />
             <span className="text-sm font-medium text-foreground">
               {csvRows.length > 0 ? `${csvRows.length} recipient${csvRows.length === 1 ? "" : "s"} loaded` : "Click to upload CSV"}
             </span>
-            <span className="text-xs text-muted">Must include a column for email address. Merge fields like {"{{"+"first_name"+"}}"} map to column headers.</span>
+            <span className="text-xs text-muted">CSV must have headers. Email column is detected automatically. Merge fields match column names.</span>
             <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvUpload} />
           </label>
           {csvRows.length > 0 && (
-            <div className="mt-4 overflow-x-auto rounded-lg border border-border">
-              <table className="w-full text-xs">
+            <div className="mt-3 overflow-x-auto rounded-lg border border-border text-xs">
+              <table className="w-full">
                 <thead className="bg-surface">
                   <tr>{csvHeaders.map((h) => <th key={h} className="px-3 py-2 text-left font-medium text-muted">{h}</th>)}</tr>
                 </thead>
@@ -349,24 +406,24 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
                   ))}
                 </tbody>
               </table>
-              {csvRows.length > 3 && <p className="px-3 py-2 text-xs text-muted">…and {csvRows.length - 3} more rows</p>}
+              {csvRows.length > 3 && <p className="px-3 py-2 text-muted">…and {csvRows.length - 3} more rows</p>}
             </div>
           )}
         </Step>
 
-        {/* Step 3: Email config */}
-        <Step number={3} title="Configure email">
+        {/* Step 3: Email settings */}
+        <Step number={3} title="Email settings">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-muted">Email column</label>
               <select value={emailCol} onChange={(e) => setEmailCol(e.target.value)}
                 className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-accent focus:outline-none">
-                <option value="">— select column —</option>
+                <option value="">— select —</option>
                 {csvHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
               </select>
             </div>
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">Name column (optional)</label>
+              <label className="text-xs font-medium text-muted">Name column <span className="text-muted/60">(optional)</span></label>
               <select value={nameCol} onChange={(e) => setNameCol(e.target.value)}
                 className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-accent focus:outline-none">
                 <option value="">— none —</option>
@@ -374,7 +431,7 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
               </select>
             </div>
             <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <label className="text-xs font-medium text-muted">Subject line <span className="text-muted/60">(merge fields work here too)</span></label>
+              <label className="text-xs font-medium text-muted">Subject <span className="text-muted/60">(merge fields work here)</span></label>
               <input value={subject} onChange={(e) => setSubject(e.target.value)}
                 className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-accent focus:outline-none" />
             </div>
@@ -383,153 +440,178 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
               <input value={fromName} onChange={(e) => setFromName(e.target.value)}
                 className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-accent focus:outline-none" />
             </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-muted">From email <span className="text-muted/60">(must match your verified domain)</span></label>
+              <input value={fromEmail} onChange={(e) => setFromEmail(e.target.value)}
+                placeholder="noreply@yourcompany.com"
+                className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted focus:border-accent focus:outline-none" />
+            </div>
+          </div>
+          <label className="mt-4 flex items-center gap-2 text-sm text-foreground cursor-pointer">
+            <input type="checkbox" checked={attachPdf} onChange={(e) => setAttachPdf(e.target.checked)} className="rounded" />
+            Attach PDF to each email
+          </label>
+        </Step>
+
+        {/* Step 4: Provider */}
+        <Step number={4} title="Email provider">
+          {/* Provider tabs */}
+          <div className="flex gap-2 flex-wrap mb-4">
+            {(["resend", "sendgrid", "smtp"] as ProviderType[]).map((pt) => {
+              const info = PROVIDER_INFO[pt];
+              return (
+                <button key={pt} onClick={() => setProviderType(pt)}
+                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${providerType === pt ? "border-accent bg-accent/10 text-foreground" : "border-border text-muted hover:border-border/80 hover:text-foreground"}`}>
+                  <span>{info.icon}</span> {info.label}
+                  <span className={`rounded px-1.5 py-0.5 text-xs ${info.badgeColor}`}>{info.badge}</span>
+                </button>
+              );
+            })}
           </div>
 
-          {/* SMTP settings collapsible */}
-          <button onClick={() => setShowSmtp((v) => !v)}
-            className="mt-4 flex items-center gap-2 text-xs font-medium text-muted transition-colors hover:text-foreground">
-            <Settings2 size={13} />
-            SMTP settings
-            {showSmtp ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-            {smtpReady && <span className="ml-1 rounded bg-green-500/15 px-1.5 py-0.5 text-green-400">configured</span>}
+          <p className="mb-4 text-xs text-muted">{providerInfo.desc}</p>
+
+          {/* Provider-specific config */}
+          <button onClick={() => setShowProviderCfg((v) => !v)}
+            className="flex items-center gap-2 text-xs font-medium text-muted hover:text-foreground mb-3">
+            <Settings2 size={12} />
+            {showProviderCfg ? "Hide" : "Configure"} {providerInfo.label} credentials
+            {showProviderCfg ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            {providerReady && <span className="ml-1 rounded bg-green-500/15 px-1.5 py-0.5 text-green-400">ready</span>}
           </button>
 
-          {showSmtp && (
-            <div className="mt-3 grid gap-3 rounded-xl border border-border bg-surface/50 p-4 sm:grid-cols-2">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-muted">SMTP host</label>
-                <input value={smtpCfg.host} onChange={(e) => saveSmtp({ ...smtpCfg, host: e.target.value })}
-                  placeholder="smtp.gmail.com" className="rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none" />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-muted">Port</label>
-                <input type="number" value={smtpCfg.port} onChange={(e) => saveSmtp({ ...smtpCfg, port: Number(e.target.value) })}
-                  className="rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none" />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-muted">Username / email</label>
-                <input value={smtpCfg.user} onChange={(e) => saveSmtp({ ...smtpCfg, user: e.target.value })}
-                  placeholder="you@gmail.com" className="rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none" />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-muted">Password / app password</label>
-                <input type="password" value={smtpCfg.pass} onChange={(e) => saveSmtp({ ...smtpCfg, pass: e.target.value })}
-                  placeholder="••••••••" className="rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none" />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-muted">From address <span className="text-muted/60">(if different from username)</span></label>
-                <input value={smtpCfg.from} onChange={(e) => saveSmtp({ ...smtpCfg, from: e.target.value })}
-                  placeholder="noreply@yourcompany.com" className="rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none" />
-              </div>
-              <div className="flex items-end gap-2">
-                <label className="flex items-center gap-1.5 text-xs text-muted">
-                  <input type="checkbox" checked={smtpCfg.secure} onChange={(e) => saveSmtp({ ...smtpCfg, secure: e.target.checked })} />
-                  SSL/TLS (port 465)
-                </label>
-              </div>
-              <div className="sm:col-span-2">
-                <button onClick={testSmtp} disabled={smtpStatus === "testing" || !smtpCfg.host}
-                  className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs transition-colors hover:bg-white/5 disabled:opacity-40">
-                  {smtpStatus === "testing" ? <Loader2 size={12} className="animate-spin" /> : <Settings2 size={12} />}
-                  Test connection
-                </button>
-                {smtpStatus === "ok" && <p className="mt-1.5 flex items-center gap-1 text-xs text-green-400"><CheckCircle2 size={12} /> SMTP connected</p>}
-                {smtpStatus === "error" && <p className="mt-1.5 flex items-center gap-1 text-xs text-red-400"><XCircle size={12} /> {smtpError}</p>}
-                <p className="mt-2 text-xs text-muted/60">
-                  Gmail: use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener" className="text-accent hover:underline">app password</a>, not your main password.
-                  For Outlook use smtp.office365.com:587. SMTP settings are saved in your browser only.
-                </p>
-              </div>
+          {showProviderCfg && (
+            <div className="rounded-xl border border-border bg-surface/50 p-4 space-y-3">
+              {providerType === "resend" && (
+                <>
+                  <Field label="Resend API key" hint={<>Get it from <a href="https://resend.com/api-keys" target="_blank" rel="noopener" className="text-accent hover:underline">resend.com/api-keys</a></>}>
+                    <input type="password" value={resendCfg.apiKey} onChange={(e) => setResendCfg({ ...resendCfg, apiKey: e.target.value })}
+                      placeholder="re_xxxxxxxxxxxx" className="input-sm" />
+                  </Field>
+                  <Field label="Sending domain" hint="Must be verified in Resend dashboard. Add SPF + DKIM DNS records.">
+                    <input value={resendCfg.domain} onChange={(e) => setResendCfg({ ...resendCfg, domain: e.target.value })}
+                      placeholder="yourcompany.com" className="input-sm" />
+                  </Field>
+                  <div className="rounded-lg border border-green-500/20 bg-green-500/5 p-3 text-xs text-green-300/80">
+                    <strong className="text-green-300">Domain setup (one-time, 5 min):</strong>
+                    <ol className="mt-1 space-y-0.5 pl-4 list-decimal">
+                      <li>Go to resend.com → Domains → Add domain</li>
+                      <li>Add the 3 DNS TXT records they show you (SPF, DKIM, DMARC)</li>
+                      <li>Wait ~10 min for DNS to propagate</li>
+                      <li>From that domain you can send millions of emails with great deliverability</li>
+                    </ol>
+                  </div>
+                </>
+              )}
+              {providerType === "sendgrid" && (
+                <>
+                  <Field label="SendGrid API key" hint={<>Create one at <a href="https://app.sendgrid.com/settings/api_keys" target="_blank" rel="noopener" className="text-accent hover:underline">SendGrid API keys</a> with "Mail Send" permission</>}>
+                    <input type="password" value={sgCfg.apiKey} onChange={(e) => setSgCfg({ apiKey: e.target.value })}
+                      placeholder="SG.xxxxxxxxxxxx" className="input-sm" />
+                  </Field>
+                  <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-300/80">
+                    <strong className="text-blue-300">Before sending at scale:</strong> Verify your sender domain in SendGrid (Settings → Sender Authentication). Free plan = 100/day. Paid = unlimited.
+                  </div>
+                </>
+              )}
+              {providerType === "smtp" && (
+                <>
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-300/80">
+                    <strong className="text-amber-300">Warning:</strong> Gmail and Outlook block bulk sending. Max ~500/day before getting flagged. Only use SMTP for small internal lists. For client emails use Resend or SendGrid.
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="SMTP host"><input value={smtpCfg.host} onChange={(e) => setSmtpCfg({ ...smtpCfg, host: e.target.value })} placeholder="smtp.gmail.com" className="input-sm" /></Field>
+                    <Field label="Port"><input type="number" value={smtpCfg.port} onChange={(e) => setSmtpCfg({ ...smtpCfg, port: Number(e.target.value) })} className="input-sm" /></Field>
+                    <Field label="Username"><input value={smtpCfg.user} onChange={(e) => setSmtpCfg({ ...smtpCfg, user: e.target.value })} placeholder="you@gmail.com" className="input-sm" /></Field>
+                    <Field label="Password / App password"><input type="password" value={smtpCfg.pass} onChange={(e) => setSmtpCfg({ ...smtpCfg, pass: e.target.value })} placeholder="••••••••" className="input-sm" /></Field>
+                    <Field label="From address"><input value={smtpCfg.from} onChange={(e) => setSmtpCfg({ ...smtpCfg, from: e.target.value })} placeholder="noreply@company.com" className="input-sm" /></Field>
+                    <Field label="">
+                      <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer">
+                        <input type="checkbox" checked={smtpCfg.secure} onChange={(e) => setSmtpCfg({ ...smtpCfg, secure: e.target.checked })} />
+                        SSL/TLS (port 465)
+                      </label>
+                    </Field>
+                  </div>
+                </>
+              )}
+              <p className="text-xs text-muted/60 flex items-center gap-1"><Info size={10} /> Credentials are saved in your browser only — never sent to DocKaro servers except to relay each email.</p>
             </div>
           )}
         </Step>
 
         {/* Actions */}
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-3 mt-2">
           <button onClick={runPreview} disabled={!selectedId || !csvRows.length}
             className="flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-3 text-sm font-medium text-foreground transition-colors hover:border-accent/50 hover:bg-accent/5 disabled:opacity-40">
             <Eye size={15} /> Preview first row
           </button>
           <button onClick={downloadAllPdfs} disabled={!csvRows.length}
             className="flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-3 text-sm font-medium text-foreground transition-colors hover:border-accent/50 hover:bg-accent/5 disabled:opacity-40">
-            <Download size={15} /> Download {csvRows.length} PDF{csvRows.length === 1 ? "" : "s"}
+            <Download size={15} /> Download {csvRows.length || "all"} PDF{csvRows.length !== 1 ? "s" : ""}
           </button>
           <button
             onClick={sending ? () => { abortRef.current = true; } : sendAll}
-            disabled={!csvRows.length || !emailCol || !smtpReady}
-            className={`flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-medium text-white transition-opacity disabled:opacity-40 ${sending ? "bg-red-500 hover:opacity-90" : "bg-accent hover:opacity-90"}`}
-            title={!smtpReady ? "Configure SMTP settings first" : ""}
-          >
+            disabled={!csvRows.length || !emailCol || !providerReady}
+            title={!providerReady ? `Configure ${providerInfo.label} credentials first` : ""}
+            className={`flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-medium text-white transition-opacity disabled:opacity-40 ${sending ? "bg-red-500 hover:opacity-90" : "bg-accent hover:opacity-90"}`}>
             {sending ? (
-              <><Loader2 size={15} className="animate-spin" /> Stop sending</>
+              <><Loader2 size={15} className="animate-spin" /> Abort sending</>
             ) : (
-              <><Send size={15} /> Send to {csvRows.length} recipient{csvRows.length === 1 ? "" : "s"}</>
+              <><Send size={15} /> Send to {csvRows.length || "…"} recipients via {providerInfo.label}</>
             )}
           </button>
         </div>
 
-        {!smtpReady && csvRows.length > 0 && (
+        {!providerReady && csvRows.length > 0 && (
           <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-400">
             <AlertTriangle size={13} />
-            Configure SMTP settings above to enable email sending. PDF download works without SMTP.
+            Configure {providerInfo.label} credentials in Step 4 to enable sending. PDF download works without any setup.
           </div>
         )}
 
-        {/* Results */}
+        {/* Progress */}
         {results.length > 0 && (
           <div className="mt-6 rounded-xl border border-border bg-surface p-5">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <h2 className="text-sm font-semibold text-foreground">Send progress</h2>
-                <span className="text-xs text-green-400">{sentOk} sent</span>
-                {sentFail > 0 && <span className="text-xs text-red-400">{sentFail} failed</span>}
+            <div className="mb-3 flex items-center justify-between flex-wrap gap-2">
+              <h2 className="text-sm font-semibold text-foreground">Send progress — {csvRows.length} recipients</h2>
+              <div className="flex gap-3 text-xs">
+                {sentOk > 0 && <span className="flex items-center gap-1 text-green-400"><CheckCircle2 size={12} /> {sentOk} sent</span>}
+                {sentSkip > 0 && <span className="flex items-center gap-1 text-muted"><Mail size={12} /> {sentSkip} unsubscribed</span>}
+                {sentFail > 0 && <span className="flex items-center gap-1 text-red-400"><XCircle size={12} /> {sentFail} failed</span>}
               </div>
-              <button onClick={() => setShowResults((v) => !v)} className="text-xs text-muted hover:text-foreground">
-                {showResults ? "Hide" : "Show"} details
-              </button>
             </div>
-            {/* Progress bar */}
-            <div className="mb-4 h-2 w-full overflow-hidden rounded-full bg-border">
-              <div
-                className="h-full rounded-full bg-accent transition-all duration-300"
-                style={{ width: `${results.length ? ((sentOk + sentFail) / results.length) * 100 : 0}%` }}
-              />
+            <div className="h-2 w-full overflow-hidden rounded-full bg-border mb-1">
+              <div className="h-full rounded-full bg-accent transition-all duration-300" style={{ width: `${progress}%` }} />
             </div>
-            {showResults && (
-              <div className="max-h-64 overflow-y-auto space-y-1">
-                {results.map((r, i) => (
-                  <div key={i} className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs">
-                    {r.status === "pending" && <div className="h-3 w-3 rounded-full border border-border" />}
-                    {r.status === "sending" && <Loader2 size={12} className="animate-spin text-accent" />}
-                    {r.status === "ok" && <CheckCircle2 size={12} className="text-green-400" />}
-                    {r.status === "error" && <XCircle size={12} className="text-red-400" />}
-                    <span className={r.status === "ok" ? "text-foreground" : r.status === "error" ? "text-red-400" : "text-muted"}>
-                      {r.email}
-                    </span>
-                    {r.error && <span className="ml-auto text-red-400/70">{r.error}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
+            <p className="text-xs text-muted mb-4">{progress}% complete · batches of {BATCH_SIZE} with {BATCH_DELAY_MS / 1000}s cooldown</p>
+            <div className="max-h-56 overflow-y-auto space-y-0.5">
+              {results.map((r, i) => (
+                <div key={i} className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs hover:bg-white/3">
+                  {r.status === "pending" && <div className="h-3 w-3 rounded-full border border-border shrink-0" />}
+                  {r.status === "sending" && <Loader2 size={12} className="animate-spin text-accent shrink-0" />}
+                  {r.status === "ok" && <CheckCircle2 size={12} className="text-green-400 shrink-0" />}
+                  {r.status === "skipped" && <Mail size={12} className="text-muted shrink-0" />}
+                  {r.status === "error" && <XCircle size={12} className="text-red-400 shrink-0" />}
+                  <span className={r.status === "ok" ? "text-foreground" : r.status === "error" ? "text-red-400" : "text-muted"}>{r.email}</span>
+                  {r.status === "skipped" && <span className="text-muted/60">unsubscribed</span>}
+                  {r.error && <span className="ml-auto text-red-400/70 truncate max-w-xs">{r.error}</span>}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* Preview pane */}
+        {/* Preview */}
         {preview && (
           <div className="mt-6 rounded-xl border border-border bg-surface p-5">
-            <div className="mb-4 flex items-center gap-3">
-              <h2 className="text-sm font-semibold text-foreground">Preview — row 1</h2>
-              <div className="flex gap-2">
-                <span className="rounded bg-accent/10 px-2 py-0.5 text-xs text-accent flex items-center gap-1"><FileText size={10} /> PDF</span>
-                <span className="rounded bg-green-500/10 px-2 py-0.5 text-xs text-green-400 flex items-center gap-1"><Mail size={10} /> Email</span>
-              </div>
-            </div>
+            <h2 className="mb-3 text-sm font-semibold text-foreground">Preview — row 1</h2>
+            <p className="mb-2 text-xs text-muted">Subject: <span className="text-foreground">{applyMerge(subject, csvRows[0] ?? {})}</span></p>
             <div className="rounded-lg border border-border bg-background p-4">
-              <pre className="whitespace-pre-wrap text-sm text-foreground leading-relaxed">{preview.text}</pre>
+              <pre className="whitespace-pre-wrap text-sm text-foreground leading-relaxed">{preview}</pre>
             </div>
-            <div className="mt-3 text-xs text-muted">
-              Subject: <span className="text-foreground">{applyMerge(subject, csvRows[0] ?? {})}</span>
-            </div>
+            <p className="mt-2 text-xs text-muted/60 flex items-center gap-1">
+              <ShieldCheck size={11} /> An unsubscribe link is automatically added to every email footer.
+            </p>
           </div>
         )}
       </main>
@@ -539,12 +621,22 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
 
 function Step({ number, title, children }: { number: number; title: string; children: React.ReactNode }) {
   return (
-    <div className="mb-5 rounded-xl border border-border bg-surface p-5">
+    <div className="mb-4 rounded-xl border border-border bg-surface p-5">
       <div className="mb-4 flex items-center gap-3">
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent text-xs font-bold text-white">{number}</span>
+        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent text-xs font-bold text-white shrink-0">{number}</span>
         <h2 className="text-sm font-semibold text-foreground">{title}</h2>
       </div>
       {children}
+    </div>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      {label && <label className="text-xs text-muted">{label}</label>}
+      {children}
+      {hint && <p className="text-xs text-muted/60">{hint}</p>}
     </div>
   );
 }

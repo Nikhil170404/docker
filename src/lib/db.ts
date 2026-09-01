@@ -53,5 +53,24 @@ function migrate(db: ReturnType<typeof Database>) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS unsubscribes (
+      email      TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS send_logs (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL,
+      template_id TEXT,
+      recipient   TEXT NOT NULL,
+      subject     TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'sent',
+      provider    TEXT NOT NULL DEFAULT 'smtp',
+      sent_at     TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_send_logs_user ON send_logs(user_id, sent_at DESC);
   `);
 }
