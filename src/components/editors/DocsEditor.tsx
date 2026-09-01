@@ -42,6 +42,7 @@ import { createSpellCheckCommand, createSpellChecker } from "@/lib/univer/spell-
 import { createTrackChanges, createTrackChangesCommands } from "@/lib/univer/track-changes";
 import { createWatermarkCommand } from "@/lib/univer/watermark";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
+import { importDocxFromFile } from "@/lib/univer/docx/import";
 
 const STORAGE_KEY = "docs-default";
 const AUTOSAVE_DELAY_MS = 600;
@@ -81,6 +82,8 @@ export type DocsEditorHandle = {
   getRulerGeometry: () => RulerGeometry | null;
   setIndents: (indents: { indentStart?: number; indentEnd?: number; indentFirstLine?: number }) => void;
   setMargins: (margins: { marginLeft?: number; marginRight?: number }) => void;
+  /** Replace the current document with one imported from a .docx file. */
+  openDocx: (file: File) => Promise<void>;
 };
 
 export default function DocsEditor({
@@ -95,6 +98,7 @@ export default function DocsEditor({
   const commandServiceRef = useRef<ICommandService | null>(null);
   const rulerGeometryRef = useRef<() => RulerGeometry | null>(() => null);
   const documentNameRef = useRef<(name: string) => void>(() => {});
+  const openDocxRef = useRef<(file: File) => Promise<void>>(async () => {});
   const statusListenerRef = useRef(onStatusChange);
   const [ready, setReady] = useState(false);
 
@@ -193,6 +197,14 @@ export default function DocsEditor({
       fDoc.setName(name);
       saveSnapshot(STORAGE_KEY, fDoc.save());
       void refreshStatus();
+    };
+
+    openDocxRef.current = async (file: File) => {
+      const imported = await importDocxFromFile(file);
+      saveSnapshot(STORAGE_KEY, imported);
+      // Re-mount the editor by navigating to the same page — the cleanest
+      // way to load a fresh IDocumentData into an already-running Univer.
+      window.location.reload();
     };
 
     const wordRibbon = installWordRibbon(injector);
@@ -410,6 +422,7 @@ export default function DocsEditor({
       disposedRef.current = false;
       commandServiceRef.current = null;
       documentNameRef.current = () => {};
+      openDocxRef.current = async () => {};
       rulerGeometryRef.current = () => null;
       setReady(false);
     };
@@ -427,6 +440,7 @@ export default function DocsEditor({
     setMargins: (margins) => {
       void commandServiceRef.current?.executeCommand(SetPageMarginsCommandId, margins);
     },
+    openDocx: (file: File) => openDocxRef.current(file),
   }));
 
   return (
