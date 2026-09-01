@@ -1,19 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT id, template_title, recipient_count, scheduled_for, status, sent_at, error, created_at FROM scheduled_sends WHERE user_id = ? ORDER BY scheduled_for DESC LIMIT 100"
-    )
-    .all(session.id);
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("scheduled_sends")
+    .select("id, template_title, recipient_count, scheduled_for, status, sent_at, error, created_at")
+    .eq("user_id", session.id)
+    .order("scheduled_for", { ascending: false })
+    .limit(100);
 
-  return NextResponse.json({ scheduled: rows });
+  return NextResponse.json({ scheduled: data ?? [] });
 }
 
 export async function POST(req: NextRequest) {
@@ -30,21 +31,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "scheduledFor must be a future date" }, { status: 400 });
   }
 
-  const db = getDb();
+  const supabase = await createClient();
   const id = `sch_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   const now = new Date().toISOString();
 
-  db.prepare(
-    `INSERT INTO scheduled_sends (id, user_id, payload, template_title, recipient_count, scheduled_for, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
-  ).run(
-    id, session.id,
-    typeof body.payload === "string" ? body.payload : JSON.stringify(body.payload),
-    body.templateTitle ?? "",
-    body.recipientCount ?? 0,
-    scheduledFor.toISOString(),
-    now
-  );
+  await supabase.from("scheduled_sends").insert({
+    id,
+    user_id: session.id,
+    payload: typeof body.payload === "string" ? body.payload : JSON.stringify(body.payload),
+    template_title: body.templateTitle ?? "",
+    recipient_count: body.recipientCount ?? 0,
+    scheduled_for: scheduledFor.toISOString(),
+    status: "pending",
+    created_at: now,
+  });
 
   return NextResponse.json({ id }, { status: 201 });
 }

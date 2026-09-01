@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 
 export async function PATCH(req: NextRequest) {
   const session = await getSession();
@@ -12,7 +12,7 @@ export async function PATCH(req: NextRequest) {
   const name = typeof body.name === "string" ? body.name.trim() : null;
   if (!name) return NextResponse.json({ error: "Name is required" }, { status: 400 });
 
-  const db = getDb();
-  db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, session.id);
+  const supabase = await createClient();
+  await supabase.from("profiles").update({ name }).eq("id", session.id);
   return NextResponse.json({ ok: true });
 }

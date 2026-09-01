@@ -8,8 +8,7 @@ export async function GET(req: NextRequest) {
   const email = parseUnsubToken(token);
   if (!email) return new NextResponse("Invalid or expired link", { status: 400 });
 
-  // Mark unsubscribed — no userId needed for opt-out
-  markUnsubscribed(email, "system");
+  await markUnsubscribed(email, "system");
 
   return new NextResponse(
     `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:480px;margin:80px auto;text-align:center;color:#374151">

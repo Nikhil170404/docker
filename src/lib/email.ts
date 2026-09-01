@@ -3,7 +3,7 @@
  * Supports Resend (recommended for scale), SendGrid, and SMTP fallback.
  * All providers honour unsubscribes before sending.
  */
-import { getDb } from "./db";
+import { createAdminClient } from "./supabase/admin";
 import { createHmac } from "crypto";
 
 const UNSUB_SECRET = process.env.UNSUB_SECRET ?? "dockaro-unsub-secret-change-in-prod";
@@ -30,15 +30,21 @@ export function parseUnsubToken(token: string): string | null {
   }
 }
 
-export function isUnsubscribed(email: string): boolean {
-  const db = getDb();
-  return !!db.prepare("SELECT 1 FROM unsubscribes WHERE email = ?").get(email.toLowerCase());
+export async function isUnsubscribed(email: string): Promise<boolean> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("unsubscribes")
+    .select("email")
+    .eq("email", email.toLowerCase())
+    .maybeSingle();
+  return !!data;
 }
 
-export function markUnsubscribed(email: string, userId: string) {
-  const db = getDb();
-  db.prepare("INSERT OR IGNORE INTO unsubscribes (email, user_id, created_at) VALUES (?, ?, ?)").run(
-    email.toLowerCase(), userId, new Date().toISOString()
+export async function markUnsubscribed(email: string, userId: string): Promise<void> {
+  const admin = createAdminClient();
+  await admin.from("unsubscribes").upsert(
+    { email: email.toLowerCase(), user_id: userId, created_at: new Date().toISOString() },
+    { onConflict: "email", ignoreDuplicates: true }
   );
 }
 

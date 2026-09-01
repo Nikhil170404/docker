@@ -1,26 +1,16 @@
 import { notFound } from "next/navigation";
-import { getDb } from "@/lib/db";
+import { createAdminClient } from "@/lib/supabase/admin";
 import SignClient from "./SignClient";
 
 export default async function SignPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const db = getDb();
+  const admin = createAdminClient();
 
-  const req = db
-    .prepare(
-      "SELECT id, sender_name, recipient_email, recipient_name, doc_title, doc_content, message, status, expires_at FROM sign_requests WHERE doc_token = ?"
-    )
-    .get(token) as {
-    id: string;
-    sender_name: string;
-    recipient_email: string;
-    recipient_name: string;
-    doc_title: string;
-    doc_content: string;
-    message: string;
-    status: string;
-    expires_at: string;
-  } | undefined;
+  const { data: req } = await admin
+    .from("sign_requests")
+    .select("sender_name, recipient_name, doc_title, doc_content, message, status, expires_at")
+    .eq("doc_token", token)
+    .single();
 
   if (!req) notFound();
 

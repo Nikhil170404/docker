@@ -1,21 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 import { generateApiKey } from "@/lib/api-auth";
 import { createHmac } from "crypto";
 
 const API_KEY_SECRET = process.env.API_KEY_SECRET ?? "dockaro-api-key-secret-change-in-prod";
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const db = getDb();
-  const keys = db
-    .prepare("SELECT id, label, revoked, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC")
-    .all(session.id);
-
-  return NextResponse.json({ keys });
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("api_keys")
+    .select("id, label, revoked, created_at")
+    .eq("user_id", session.id)
+    .order("created_at", { ascending: false });
+  return NextResponse.json({ keys: data ?? [] });
 }
 
 export async function POST(req: NextRequest) {
@@ -30,11 +30,15 @@ export async function POST(req: NextRequest) {
   const id = `key_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   const now = new Date().toISOString();
 
-  const db = getDb();
-  db.prepare(
-    "INSERT INTO api_keys (id, user_id, key_hash, label, revoked, created_at) VALUES (?, ?, ?, ?, 0, ?)"
-  ).run(id, session.id, keyHash, label, now);
+  const supabase = await createClient();
+  await supabase.from("api_keys").insert({
+    id,
+    user_id: session.id,
+    key_hash: keyHash,
+    label,
+    revoked: 0,
+    created_at: now,
+  });
 
-  // Return plaintext key ONCE — never stored
   return NextResponse.json({ id, label, key: rawKey, created_at: now }, { status: 201 });
 }

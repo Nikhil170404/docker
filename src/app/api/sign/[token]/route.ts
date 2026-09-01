@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function POST(
   req: NextRequest,
@@ -11,21 +11,26 @@ export async function POST(
     return NextResponse.json({ error: "Missing signature data" }, { status: 400 });
   }
 
-  const db = getDb();
-  const row = db
-    .prepare("SELECT id, status, expires_at FROM sign_requests WHERE doc_token = ?")
-    .get(token) as { id: string; status: string; expires_at: string } | undefined;
+  const admin = createAdminClient();
+  const { data: row } = await admin
+    .from("sign_requests")
+    .select("id, status, expires_at")
+    .eq("doc_token", token)
+    .single();
 
   if (!row) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (row.status === "signed") return NextResponse.json({ error: "Already signed" }, { status: 409 });
-  if (new Date(row.expires_at) < new Date()) return NextResponse.json({ error: "Link expired" }, { status: 410 });
+  if (new Date(row.expires_at) < new Date()) {
+    return NextResponse.json({ error: "Link expired" }, { status: 410 });
+  }
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
   const now = new Date().toISOString();
 
-  db.prepare(
-    "UPDATE sign_requests SET status = 'signed', sig_data_url = ?, ip_address = ?, signed_at = ? WHERE doc_token = ?"
-  ).run(body.sigDataUrl, ip, now, token);
+  await admin
+    .from("sign_requests")
+    .update({ status: "signed", sig_data_url: body.sigDataUrl, ip_address: ip, signed_at: now })
+    .eq("doc_token", token);
 
   return NextResponse.json({ ok: true });
 }

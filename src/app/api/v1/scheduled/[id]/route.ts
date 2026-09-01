@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 
 export async function DELETE(
   _req: NextRequest,
@@ -10,18 +10,23 @@ export async function DELETE(
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id } = await params;
-  const db = getDb();
-  const row = db
-    .prepare("SELECT user_id, status FROM scheduled_sends WHERE id = ?")
-    .get(id) as { user_id: string; status: string } | undefined;
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("scheduled_sends")
+    .select("user_id, status")
+    .eq("id", id)
+    .single();
 
-  if (!row || row.user_id !== session.id) {
+  if (!data || data.user_id !== session.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (row.status !== "pending") {
+  if (data.status !== "pending") {
     return NextResponse.json({ error: "Can only cancel pending sends" }, { status: 409 });
   }
 
-  db.prepare("UPDATE scheduled_sends SET status = 'cancelled' WHERE id = ?").run(id);
+  await supabase
+    .from("scheduled_sends")
+    .update({ status: "cancelled" })
+    .eq("id", id);
   return NextResponse.json({ ok: true });
 }

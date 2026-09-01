@@ -8,7 +8,7 @@ export default async function DocEditorPage({ params }: { params: Promise<{ id: 
   const session = await getSession();
   if (!session) redirect(`/login?next=/editor/docs/${id}`);
 
-  const doc = getDocument(id, session.id);
+  const doc = await getDocument(id, session.id);
   if (!doc) notFound();
 
   return <DocEditorWithId doc={doc} />;

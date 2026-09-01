@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 import { isUnsubscribed, buildHtmlEmail, buildTextEmail } from "@/lib/email";
 import nodemailer from "nodemailer";
 
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
 
   const email = body.to.trim().toLowerCase();
 
-  if (isUnsubscribed(email)) {
+  if (await isUnsubscribed(email)) {
     return NextResponse.json({ skipped: true, reason: "unsubscribed" });
   }
 
@@ -44,9 +44,7 @@ export async function POST(req: NextRequest) {
   const html = body.mergedText
     ? buildHtmlEmail(body.mergedText, fromName, email)
     : (body.bodyHtml ?? "");
-  const text = body.mergedText
-    ? buildTextEmail(body.mergedText, fromName, email)
-    : "";
+  const text = body.mergedText ? buildTextEmail(body.mergedText, fromName, email) : "";
 
   const transporter = nodemailer.createTransport({
     host: smtp.host,
@@ -57,7 +55,13 @@ export async function POST(req: NextRequest) {
   });
 
   const attachments = pdfBase64
-    ? [{ filename: pdfFilename ?? "document.pdf", content: Buffer.from(pdfBase64, "base64"), contentType: "application/pdf" }]
+    ? [
+        {
+          filename: pdfFilename ?? "document.pdf",
+          content: Buffer.from(pdfBase64, "base64"),
+          contentType: "application/pdf",
+        },
+      ]
     : [];
 
   await transporter.sendMail({
@@ -69,11 +73,18 @@ export async function POST(req: NextRequest) {
     attachments,
   });
 
-  const db = getDb();
+  const supabase = await createClient();
   const id = `log_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
-  db.prepare(
-    "INSERT INTO send_logs (id, user_id, template_id, recipient, subject, status, provider, sent_at) VALUES (?, ?, ?, ?, ?, 'sent', 'smtp', ?)"
-  ).run(id, session.id, body.templateId ?? null, email, subject, new Date().toISOString());
+  await supabase.from("send_logs").insert({
+    id,
+    user_id: session.id,
+    template_id: body.templateId ?? null,
+    recipient: email,
+    subject,
+    status: "sent",
+    provider: "smtp",
+    sent_at: new Date().toISOString(),
+  });
 
   return NextResponse.json({ ok: true });
 }

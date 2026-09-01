@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 const GIF_1X1 = Buffer.from(
   "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
@@ -13,15 +13,22 @@ export async function GET(
   const { token } = await params;
   if (token) {
     try {
-      const db = getDb();
+      const admin = createAdminClient();
       const now = new Date().toISOString();
-      const row = db
-        .prepare("SELECT id, view_count, first_viewed_at FROM email_views WHERE view_token = ?")
-        .get(token) as { id: string; view_count: number; first_viewed_at: string | null } | undefined;
+      const { data: row } = await admin
+        .from("email_views")
+        .select("id, view_count, first_viewed_at")
+        .eq("view_token", token)
+        .single();
       if (row) {
-        db.prepare(
-          "UPDATE email_views SET view_count = view_count + 1, last_viewed_at = ?, first_viewed_at = COALESCE(first_viewed_at, ?) WHERE view_token = ?"
-        ).run(now, now, token);
+        await admin
+          .from("email_views")
+          .update({
+            view_count: (row.view_count ?? 0) + 1,
+            last_viewed_at: now,
+            first_viewed_at: row.first_viewed_at ?? now,
+          })
+          .eq("view_token", token);
       }
     } catch {
       // never fail on tracking errors

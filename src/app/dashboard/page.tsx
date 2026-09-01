@@ -7,7 +7,7 @@ export default async function DashboardPage() {
   const session = await getSession();
   if (!session) redirect("/login?next=/dashboard");
 
-  const docs = listDocuments(session.id);
+  const docs = await listDocuments(session.id);
 
   return <DashboardClient session={session} initialDocs={docs} />;
 }

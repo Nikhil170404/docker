@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 import {
   sendEmail,
   buildHtmlEmail,
@@ -41,11 +41,11 @@ export async function POST(req: NextRequest) {
 
   const email = body.recipientEmail.trim().toLowerCase();
 
-  if (isUnsubscribed(email)) {
+  if (await isUnsubscribed(email)) {
     return NextResponse.json({ skipped: true, reason: "unsubscribed" });
   }
 
-  const db = getDb();
+  const supabase = await createClient();
   const logId = `log_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 
   // Email open tracking token
@@ -53,24 +53,35 @@ export async function POST(req: NextRequest) {
   if (body.trackOpens !== false) {
     trackingToken = makeToken("ev");
     const viewId = `ev_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
-    db.prepare(
-      "INSERT INTO email_views (id, log_id, user_id, view_token, recipient) VALUES (?, ?, ?, ?, ?)"
-    ).run(viewId, logId, session.id, trackingToken, email);
+    await supabase.from("email_views").insert({
+      id: viewId,
+      log_id: logId,
+      user_id: session.id,
+      view_token: trackingToken,
+      recipient: email,
+    });
   }
 
   // LP portal token — create or reuse per email+user
   let lpPortalToken: string | undefined;
   if (body.lpPortal !== false) {
-    const existing = db
-      .prepare("SELECT token FROM lp_portals WHERE email = ? AND user_id = ?")
-      .get(email, session.id) as { token: string } | undefined;
+    const { data: existing } = await supabase
+      .from("lp_portals")
+      .select("token")
+      .eq("email", email)
+      .eq("user_id", session.id)
+      .maybeSingle();
     if (existing) {
       lpPortalToken = existing.token;
     } else {
       lpPortalToken = makeToken("lp");
-      db.prepare(
-        "INSERT INTO lp_portals (token, email, user_id, name, created_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(lpPortalToken, email, session.id, body.recipientName ?? "", new Date().toISOString());
+      await supabase.from("lp_portals").insert({
+        token: lpPortalToken,
+        email,
+        user_id: session.id,
+        name: body.recipientName ?? "",
+        created_at: new Date().toISOString(),
+      });
     }
   }
 
@@ -81,7 +92,13 @@ export async function POST(req: NextRequest) {
   const text = buildTextEmail(body.mergedText, body.fromName, email);
 
   const attachments = body.pdfBase64
-    ? [{ filename: body.pdfFilename ?? "document.pdf", content: Buffer.from(body.pdfBase64, "base64"), contentType: "application/pdf" }]
+    ? [
+        {
+          filename: body.pdfFilename ?? "document.pdf",
+          content: Buffer.from(body.pdfBase64, "base64"),
+          contentType: "application/pdf",
+        },
+      ]
     : undefined;
 
   await sendEmail({
@@ -96,9 +113,16 @@ export async function POST(req: NextRequest) {
     attachments,
   });
 
-  db.prepare(
-    "INSERT INTO send_logs (id, user_id, template_id, recipient, subject, status, provider, sent_at) VALUES (?, ?, ?, ?, ?, 'sent', ?, ?)"
-  ).run(logId, session.id, body.templateId ?? null, email, body.subject, body.provider.type, new Date().toISOString());
+  await supabase.from("send_logs").insert({
+    id: logId,
+    user_id: session.id,
+    template_id: body.templateId ?? null,
+    recipient: email,
+    subject: body.subject,
+    status: "sent",
+    provider: body.provider.type,
+    sent_at: new Date().toISOString(),
+  });
 
   return NextResponse.json({ ok: true });
 }

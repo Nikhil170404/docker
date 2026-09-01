@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { createClient } from "@/lib/supabase/server";
 
 export async function DELETE(
   _req: NextRequest,
@@ -10,12 +10,17 @@ export async function DELETE(
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id } = await params;
-  const db = getDb();
-  const row = db.prepare("SELECT user_id FROM api_keys WHERE id = ?").get(id) as { user_id: string } | undefined;
-  if (!row || row.user_id !== session.id) {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("api_keys")
+    .select("user_id")
+    .eq("id", id)
+    .single();
+
+  if (!data || data.user_id !== session.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  db.prepare("UPDATE api_keys SET revoked = 1 WHERE id = ?").run(id);
+  await supabase.from("api_keys").update({ revoked: 1 }).eq("id", id);
   return NextResponse.json({ ok: true });
 }
