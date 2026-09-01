@@ -49,13 +49,34 @@ export function getUnsubUrl(email: string): string {
 
 // ─── Email body builder ───────────────────────────────────────────────────────
 
-export function buildHtmlEmail(mergedText: string, fromName: string, recipientEmail: string): string {
+export interface HtmlEmailOptions {
+  trackingToken?: string;
+  lpPortalToken?: string;
+  signerToken?: string;
+}
+
+export function buildHtmlEmail(
+  mergedText: string,
+  fromName: string,
+  recipientEmail: string,
+  opts: HtmlEmailOptions = {}
+): string {
+  const base = process.env.NEXT_PUBLIC_BASE_URL ?? "https://dockaro.com";
   const escaped = mergedText
     .replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .split("\n")
     .map((l) => l.trim() ? `<p style="margin:0 0 10px;line-height:1.6">${l}</p>` : `<br>`)
     .join("\n");
   const unsubUrl = getUnsubUrl(recipientEmail);
+  const trackingPixel = opts.trackingToken
+    ? `<img src="${base}/api/track/${opts.trackingToken}" width="1" height="1" style="display:none" alt="" />`
+    : "";
+  const lpLink = opts.lpPortalToken
+    ? `&nbsp;·&nbsp;<a href="${base}/lp/${opts.lpPortalToken}" style="color:#3b82f6;text-decoration:none">View your portal</a>`
+    : "";
+  const signLink = opts.signerToken
+    ? `<tr><td style="padding:0 32px 24px"><a href="${base}/sign/${opts.signerToken}" style="display:inline-block;background:#3b82f6;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600">Sign Document</a></td></tr>`
+    : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -72,13 +93,16 @@ export function buildHtmlEmail(mergedText: string, fromName: string, recipientEm
         <tr><td style="padding:32px">
           <div style="color:#1f2937;font-size:14px">${escaped}</div>
         </td></tr>
+        ${signLink}
         <!-- Footer -->
         <tr><td style="background:#f3f4f6;padding:16px 32px;border-top:1px solid #e5e7eb">
           <p style="margin:0;font-size:11px;color:#9ca3af">
             Sent via <a href="https://dockaro.com" style="color:#3b82f6;text-decoration:none">DocKaro</a> by ${fromName.replace(/</g,"&lt;")}.
             &nbsp;·&nbsp;
             <a href="${unsubUrl}" style="color:#9ca3af">Unsubscribe</a>
+            ${lpLink}
           </p>
+          ${trackingPixel}
         </td></tr>
       </table>
     </td></tr>

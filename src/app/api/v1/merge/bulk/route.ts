@@ -20,9 +20,15 @@ export interface BulkSendPayload {
   pdfBase64?: string;
   pdfFilename?: string;
   templateId?: string;
+  trackOpens?: boolean;
+  lpPortal?: boolean;
 }
 
-export const maxDuration = 60; // Vercel: max 60s per request for free tier
+export const maxDuration = 60;
+
+function makeToken(prefix: string) {
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
 
 export async function POST(req: NextRequest) {
   const session = await getSession();
@@ -35,12 +41,43 @@ export async function POST(req: NextRequest) {
 
   const email = body.recipientEmail.trim().toLowerCase();
 
-  // Honour unsubscribes
   if (isUnsubscribed(email)) {
     return NextResponse.json({ skipped: true, reason: "unsubscribed" });
   }
 
-  const html = buildHtmlEmail(body.mergedText, body.fromName, email);
+  const db = getDb();
+  const logId = `log_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+
+  // Email open tracking token
+  let trackingToken: string | undefined;
+  if (body.trackOpens !== false) {
+    trackingToken = makeToken("ev");
+    const viewId = `ev_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    db.prepare(
+      "INSERT INTO email_views (id, log_id, user_id, view_token, recipient) VALUES (?, ?, ?, ?, ?)"
+    ).run(viewId, logId, session.id, trackingToken, email);
+  }
+
+  // LP portal token — create or reuse per email+user
+  let lpPortalToken: string | undefined;
+  if (body.lpPortal !== false) {
+    const existing = db
+      .prepare("SELECT token FROM lp_portals WHERE email = ? AND user_id = ?")
+      .get(email, session.id) as { token: string } | undefined;
+    if (existing) {
+      lpPortalToken = existing.token;
+    } else {
+      lpPortalToken = makeToken("lp");
+      db.prepare(
+        "INSERT INTO lp_portals (token, email, user_id, name, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).run(lpPortalToken, email, session.id, body.recipientName ?? "", new Date().toISOString());
+    }
+  }
+
+  const html = buildHtmlEmail(body.mergedText, body.fromName, email, {
+    trackingToken,
+    lpPortalToken,
+  });
   const text = buildTextEmail(body.mergedText, body.fromName, email);
 
   const attachments = body.pdfBase64
@@ -59,12 +96,9 @@ export async function POST(req: NextRequest) {
     attachments,
   });
 
-  // Log the send
-  const db = getDb();
-  const id = `log_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   db.prepare(
     "INSERT INTO send_logs (id, user_id, template_id, recipient, subject, status, provider, sent_at) VALUES (?, ?, ?, ?, ?, 'sent', ?, ?)"
-  ).run(id, session.id, body.templateId ?? null, email, body.subject, body.provider.type, new Date().toISOString());
+  ).run(logId, session.id, body.templateId ?? null, email, body.subject, body.provider.type, new Date().toISOString());
 
   return NextResponse.json({ ok: true });
 }

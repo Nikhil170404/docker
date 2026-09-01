@@ -11,6 +11,8 @@ interface LogRow {
   status: string;
   provider: string;
   sent_at: string;
+  view_count: number | null;
+  first_viewed_at: string | null;
 }
 
 export default async function HistoryPage() {
@@ -20,7 +22,13 @@ export default async function HistoryPage() {
   const db = getDb();
   const rows = db
     .prepare(
-      "SELECT id, template_id, recipient, subject, status, provider, sent_at FROM send_logs WHERE user_id = ? ORDER BY sent_at DESC LIMIT 500"
+      `SELECT l.id, l.template_id, l.recipient, l.subject, l.status, l.provider, l.sent_at,
+              ev.view_count, ev.first_viewed_at
+       FROM send_logs l
+       LEFT JOIN email_views ev ON ev.log_id = l.id
+       WHERE l.user_id = ?
+       ORDER BY l.sent_at DESC
+       LIMIT 500`
     )
     .all(session.id) as LogRow[];
 
@@ -32,6 +40,8 @@ export default async function HistoryPage() {
     status: r.status,
     provider: r.provider,
     sentAt: r.sent_at,
+    viewCount: r.view_count ?? 0,
+    firstViewedAt: r.first_viewed_at ?? null,
   }));
 
   return <HistoryClient session={session} logs={logs} />;

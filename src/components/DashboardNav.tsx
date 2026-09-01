@@ -10,6 +10,9 @@ const NAV_TABS = [
   { href: "/dashboard/templates", label: "Templates" },
   { href: "/dashboard/merge", label: "Mail Merge" },
   { href: "/dashboard/history", label: "Send History" },
+  { href: "/dashboard/signatures", label: "Signatures" },
+  { href: "/dashboard/scheduled", label: "Scheduled" },
+  { href: "/dashboard/settings", label: "Settings" },
 ];
 
 export default function DashboardNav({ session }: { session: SessionUser }) {

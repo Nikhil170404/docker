@@ -83,5 +83,65 @@ function migrate(db: ReturnType<typeof Database>) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+
+    CREATE TABLE IF NOT EXISTS email_views (
+      id             TEXT PRIMARY KEY,
+      log_id         TEXT NOT NULL,
+      user_id        TEXT NOT NULL,
+      view_token     TEXT UNIQUE NOT NULL,
+      recipient      TEXT NOT NULL DEFAULT '',
+      view_count     INTEGER NOT NULL DEFAULT 0,
+      first_viewed_at TEXT,
+      last_viewed_at  TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_email_views_log ON email_views(log_id);
+    CREATE INDEX IF NOT EXISTS idx_email_views_user ON email_views(user_id);
+
+    CREATE TABLE IF NOT EXISTS lp_portals (
+      token      TEXT PRIMARY KEY,
+      email      TEXT NOT NULL,
+      user_id    TEXT NOT NULL,
+      name       TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lp_portals_user ON lp_portals(user_id, email);
+
+    CREATE TABLE IF NOT EXISTS sign_requests (
+      id               TEXT PRIMARY KEY,
+      doc_token        TEXT UNIQUE NOT NULL,
+      user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      sender_name      TEXT NOT NULL DEFAULT '',
+      recipient_email  TEXT NOT NULL,
+      recipient_name   TEXT NOT NULL DEFAULT '',
+      doc_title        TEXT NOT NULL DEFAULT '',
+      doc_content      TEXT,
+      message          TEXT NOT NULL DEFAULT '',
+      sig_data_url     TEXT,
+      status           TEXT NOT NULL DEFAULT 'pending',
+      ip_address       TEXT,
+      signed_at        TEXT,
+      expires_at       TEXT NOT NULL,
+      created_at       TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sign_requests_user ON sign_requests(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS scheduled_sends (
+      id              TEXT PRIMARY KEY,
+      user_id         TEXT NOT NULL,
+      payload         TEXT NOT NULL,
+      template_title  TEXT NOT NULL DEFAULT '',
+      recipient_count INTEGER NOT NULL DEFAULT 0,
+      scheduled_for   TEXT NOT NULL,
+      sent_at         TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      error           TEXT,
+      created_at      TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sends_user ON scheduled_sends(user_id, scheduled_for);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sends_pending ON scheduled_sends(status, scheduled_for) WHERE status = 'pending';
   `);
 }
