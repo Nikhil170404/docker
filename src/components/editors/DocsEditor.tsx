@@ -527,6 +527,17 @@ export default function DocsEditor({
               cell.style.setProperty("border-bottom", "0px solid #000000");
               cell.style.setProperty("border-left",   "0px solid #000000");
             }
+            // Univer skips cells with no block-level content — empty Word cells
+            // (e.g. layout tables or invoice grids) become invisible. Add a
+            // placeholder paragraph so the cell is always rendered.
+            const hasBlock = cell.querySelector("p, div, h1, h2, h3, h4, h5, h6, ul, ol, pre, table");
+            if (!hasBlock) {
+              const ph = tmpDoc.createElement("p");
+              ph.className = "UniverNormal";
+              ph.innerHTML = cell.innerHTML.trim() || "&nbsp;";
+              cell.innerHTML = "";
+              cell.appendChild(ph);
+            }
           });
         });
 
@@ -544,7 +555,7 @@ export default function DocsEditor({
     }
 
     // Primary interception: paste event's clipboardData.getData()
-    const isWordHtml = /mso-|xmlns:w=|class="?Mso/i;
+    const isWordHtml = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=/i;
     const originalGetData = DataTransfer.prototype.getData;
     DataTransfer.prototype.getData = function (type: string): string {
       const data = originalGetData.call(this, type) as string;
