@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { FileText, Plus, Trash2, LogOut, Merge, Tag } from "lucide-react";
+import { FileText, Plus, Trash2, Merge, Tag } from "lucide-react";
+import DashboardNav from "@/components/DashboardNav";
 import type { SessionUser } from "@/lib/auth";
 
 interface Template {
@@ -15,11 +15,6 @@ interface Template {
   updatedAt: string;
 }
 
-const NAV_TABS = [
-  { href: "/dashboard", label: "Documents" },
-  { href: "/dashboard/templates", label: "Templates" },
-];
-
 export default function TemplatesClient({
   session,
   initialTemplates,
@@ -27,19 +22,12 @@ export default function TemplatesClient({
   session: SessionUser;
   initialTemplates: Template[];
 }) {
-  const router = useRouter();
   const [templates, setTemplates] = useState(initialTemplates);
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [newFields, setNewFields] = useState("");
   const [creating, setCreating] = useState(false);
-
-  async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/");
-    router.refresh();
-  }
 
   async function createTemplate() {
     if (!newTitle.trim()) return;
@@ -65,40 +53,7 @@ export default function TemplatesClient({
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-40 border-b border-border/80 bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight text-foreground">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-bold text-white">D</span>
-            DocKaro
-          </Link>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-sm text-muted sm:block">{session.email}</span>
-            <button
-              onClick={logout}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-white/5 hover:text-foreground"
-            >
-              <LogOut size={14} /> Sign out
-            </button>
-          </div>
-        </div>
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="flex gap-6 text-sm">
-            {NAV_TABS.map((tab) => (
-              <Link
-                key={tab.href}
-                href={tab.href}
-                className={`border-b-2 py-3 transition-colors ${
-                  tab.href === "/dashboard/templates"
-                    ? "border-accent text-foreground"
-                    : "border-transparent text-muted hover:text-foreground"
-                }`}
-              >
-                {tab.label}
-              </Link>
-            ))}
-          </div>
-        </div>
-      </header>
+      <DashboardNav session={session} />
 
       <main className="mx-auto max-w-6xl px-6 py-10">
         <div className="mb-8 flex items-center justify-between">

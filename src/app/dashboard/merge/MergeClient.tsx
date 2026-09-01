@@ -4,10 +4,11 @@ import { useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  LogOut, Upload, Download, Send, Settings2, CheckCircle2,
+  Upload, Download, Send, Settings2, CheckCircle2,
   XCircle, Loader2, Eye, FileText, ChevronDown, ChevronUp,
   AlertTriangle, ShieldCheck, Zap, Info, Mail,
 } from "lucide-react";
+import DashboardNav from "@/components/DashboardNav";
 import type { SessionUser } from "@/lib/auth";
 import { jsPDF } from "jspdf";
 
@@ -27,12 +28,6 @@ interface SmtpCfg { type: "smtp"; host: string; port: number; secure: boolean; u
 type ProviderCfg = ResendCfg | SendGridCfg | SmtpCfg;
 
 interface SendResult { email: string; status: "pending" | "sending" | "ok" | "skipped" | "error"; error?: string }
-
-const NAV_TABS = [
-  { href: "/dashboard", label: "Documents" },
-  { href: "/dashboard/templates", label: "Templates" },
-  { href: "/dashboard/merge", label: "Mail Merge" },
-];
 
 const LS_PROVIDER = "dockaro:email-provider";
 
@@ -192,11 +187,6 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
     return !!(smtpCfg.host && smtpCfg.user && smtpCfg.pass);
   }
 
-  async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/"); router.refresh();
-  }
-
   function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -316,27 +306,7 @@ export default function MergeClient({ session, templates, selectedTemplateId, in
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-40 border-b border-border/80 bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight text-foreground">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-bold text-white">D</span>
-            DocKaro
-          </Link>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-sm text-muted sm:block">{session.email}</span>
-            <button onClick={logout} className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-white/5 hover:text-foreground">
-              <LogOut size={14} /> Sign out
-            </button>
-          </div>
-        </div>
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="flex gap-6 text-sm">
-            {NAV_TABS.map((tab) => (
-              <Link key={tab.href} href={tab.href} className={`border-b-2 py-3 transition-colors ${tab.href === "/dashboard/merge" ? "border-accent text-foreground" : "border-transparent text-muted hover:text-foreground"}`}>{tab.label}</Link>
-            ))}
-          </div>
-        </div>
-      </header>
+      <DashboardNav session={session} />
 
       <main className="mx-auto max-w-4xl px-6 py-10">
         <div className="mb-6">

@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSession, createUser, findUserByEmail, hashPassword } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export async function POST(req: NextRequest) {
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const { allowed, retryAfterMs } = checkRateLimit(`signup:${ip}`, 5, 3_600_000);
+  if (!allowed) {
+    return NextResponse.json(
+      { error: "Too many signup attempts. Please try again later." },
+      { status: 429, headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) } }
+    );
+  }
+
   const body = await req.json().catch(() => null);
   if (!body || typeof body.email !== "string" || typeof body.password !== "string" || typeof body.name !== "string") {
     return NextResponse.json({ error: "name, email and password are required" }, { status: 400 });

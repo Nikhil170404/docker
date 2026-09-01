@@ -7,7 +7,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get("next") ?? "/dashboard";
+  const raw = params.get("next") ?? "/dashboard";
+  // Prevent open-redirect — only allow same-origin paths
+  const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/dashboard";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

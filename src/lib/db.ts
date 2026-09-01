@@ -72,5 +72,16 @@ function migrate(db: ReturnType<typeof Database>) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_send_logs_user ON send_logs(user_id, sent_at DESC);
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      key_hash   TEXT UNIQUE NOT NULL,
+      label      TEXT NOT NULL DEFAULT '',
+      revoked    INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
   `);
 }
