@@ -48,6 +48,7 @@ const STORAGE_KEY = "docs-default";
 const AUTOSAVE_DELAY_MS = 600;
 const DEFAULT_DOCUMENT_NAME = "Untitled document";
 const STATUS_REFRESH_DELAY_MS = 400;
+const DB_SAVE_DELAY_MS = 1500;
 // A4 at 96 DPI. Traditional flavor is what unlocks Word-compatible real
 // pagination (page breaks, ruler-visible page bounds) and header/footer
 // editing — both crash on creation-time documentStyle in Univer 0.25.x but
@@ -89,9 +90,18 @@ export type DocsEditorHandle = {
 export default function DocsEditor({
   apiRef,
   onStatusChange,
+  documentId,
+  initialContent,
+  onContentChange,
 }: {
   apiRef?: React.RefObject<DocsEditorHandle | null>;
   onStatusChange?: (status: WordDocumentStatus) => void;
+  /** When set, the editor uses this as its localStorage key and calls onContentChange on saves */
+  documentId?: string;
+  /** Pre-serialized IDocumentData JSON from the database */
+  initialContent?: string;
+  /** Called with serialized document JSON after each autosave */
+  onContentChange?: (content: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
@@ -100,13 +110,12 @@ export default function DocsEditor({
   const documentNameRef = useRef<(name: string) => void>(() => {});
   const openDocxRef = useRef<(file: File) => Promise<void>>(async () => {});
   const statusListenerRef = useRef(onStatusChange);
+  const onContentChangeRef = useRef(onContentChange);
   const [ready, setReady] = useState(false);
+  const storageKey = documentId ?? STORAGE_KEY;
 
-  // The editor is created once; the callback identity may change on every
-  // parent render, so it is read through a ref rather than re-running setup.
-  useEffect(() => {
-    statusListenerRef.current = onStatusChange;
-  }, [onStatusChange]);
+  useEffect(() => { statusListenerRef.current = onStatusChange; }, [onStatusChange]);
+  useEffect(() => { onContentChangeRef.current = onContentChange; }, [onContentChange]);
 
   useEffect(() => {
     if (!containerRef.current || disposedRef.current) return;
@@ -146,27 +155,17 @@ export default function DocsEditor({
       plugins: [UniverDocsFindReplacePlugin],
     });
 
-    // Docs saved before the 1.0.0-beta.2 upgrade won't have a documentStyle
-    // (it used to crash at creation time in 0.25.x — see git history), so
-    // they'd silently lose pagination/header-footer on load. Backfill it
-    // for any saved doc that predates this, without touching its content.
-    let saved = loadSnapshot<Partial<IDocumentData>>(STORAGE_KEY);
+    // Prefer DB content over localStorage (authoritative source for [id] docs)
+    let saved = initialContent
+      ? (() => { try { return JSON.parse(initialContent) as Partial<IDocumentData>; } catch { return null; } })()
+      : loadSnapshot<Partial<IDocumentData>>(storageKey);
 
-    // 1.0.0-beta.2 added a strict structural-integrity check that now runs
-    // on every edit (table start/end tokens, section IDs, etc.) and throws
-    // if violated — Univer 0.25.x never validated this, so a doc edited
-    // under the old version (in particular through our own dataStream-
-    // editing MergeTableCellsCommand) can carry corruption that only
-    // surfaces now, crashing on the very first edit after load. Check
-    // before handing anything to createDocument(): a corrupt snapshot is
-    // backed up under its own key (nothing is silently destroyed) and the
-    // editor falls back to a fresh document instead of hard-crashing.
     if (saved?.body) {
       const issues = validateDocumentStructure(saved as Pick<IDocumentData, "body" | "headers" | "footers">);
       if (issues.length > 0) {
         console.warn("[DocKaro] Saved document failed structure validation, starting fresh:", issues);
-        saveSnapshot(`${STORAGE_KEY}.corrupted.${Date.now()}`, saved);
-        clearSnapshot(STORAGE_KEY);
+        saveSnapshot(`${storageKey}.corrupted.${Date.now()}`, saved);
+        clearSnapshot(storageKey);
         saved = null;
       }
     }
@@ -195,15 +194,13 @@ export default function DocsEditor({
     commandServiceRef.current = commandService;
     documentNameRef.current = (name: string) => {
       fDoc.setName(name);
-      saveSnapshot(STORAGE_KEY, fDoc.save());
+      saveSnapshot(storageKey, fDoc.save());
       void refreshStatus();
     };
 
     openDocxRef.current = async (file: File) => {
       const imported = await importDocxFromFile(file);
-      saveSnapshot(STORAGE_KEY, imported);
-      // Re-mount the editor by navigating to the same page — the cleanest
-      // way to load a fresh IDocumentData into an already-running Univer.
+      saveSnapshot(storageKey, imported);
       window.location.reload();
     };
 
@@ -315,11 +312,17 @@ export default function DocsEditor({
       statusTimeout = setTimeout(() => void refreshStatus(), STATUS_REFRESH_DELAY_MS);
     };
 
-    // Autosave: debounce so a fast typist doesn't hit localStorage on every
-    // keystroke, and flush immediately on refresh/close so the last edit
-    // isn't lost (React's unmount cleanup never runs on a hard refresh).
     let saveTimeout: ReturnType<typeof setTimeout> | undefined;
-    const flushSave = () => saveSnapshot(STORAGE_KEY, fDoc.save());
+    let dbSaveTimeout: ReturnType<typeof setTimeout> | undefined;
+    const flushSave = () => {
+      const data = fDoc.save();
+      saveSnapshot(storageKey, data);
+      const cb = onContentChangeRef.current;
+      if (cb) {
+        clearTimeout(dbSaveTimeout);
+        dbSaveTimeout = setTimeout(() => cb(JSON.stringify(data)), DB_SAVE_DELAY_MS);
+      }
+    };
     // Word shows its Table Design tab whenever the cursor is inside a
     // table. The caret's offset against the document's own table ranges is
     // the reliable test: the selection's node path is empty right after a
@@ -380,6 +383,7 @@ export default function DocsEditor({
       window.removeEventListener("beforeunload", flushSave);
       clearTimeout(saveTimeout);
       clearTimeout(statusTimeout);
+      clearTimeout(dbSaveTimeout);
       flushSave();
       clearRememberedTableRange();
 

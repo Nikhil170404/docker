@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Menu, X } from "lucide-react";
+import { Menu, X, LayoutDashboard } from "lucide-react";
 
 const links = [
   { href: "/#product", label: "Product" },
@@ -13,6 +13,15 @@ const links = [
 
 export default function Navbar() {
   const [open, setOpen] = useState(false);
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    // Quick session check: if cookie is present, treat as logged in
+    // (middleware protects real routes; this is just for UI)
+    fetch("/api/auth/session", { method: "GET" })
+      .then((r) => setLoggedIn(r.ok))
+      .catch(() => setLoggedIn(false));
+  }, []);
 
   return (
     <header className="sticky top-0 z-50 border-b border-border/80 bg-background/80 backdrop-blur-md">
@@ -33,17 +42,27 @@ export default function Navbar() {
         </div>
 
         <div className="flex items-center gap-3">
+          {loggedIn ? (
+            <Link
+              href="/dashboard"
+              className="hidden items-center gap-1.5 text-sm text-muted transition-colors hover:text-foreground sm:flex"
+            >
+              <LayoutDashboard size={14} />
+              Dashboard
+            </Link>
+          ) : (
+            <Link
+              href="/login"
+              className="hidden text-sm text-muted transition-colors hover:text-foreground sm:block"
+            >
+              Sign in
+            </Link>
+          )}
           <Link
-            href="/editor/docs"
-            className="hidden text-sm text-muted transition-colors hover:text-foreground sm:block"
-          >
-            Sign in
-          </Link>
-          <Link
-            href="/editor/docs"
+            href={loggedIn ? "/dashboard" : "/signup"}
             className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black transition-opacity hover:opacity-90"
           >
-            Start free
+            {loggedIn ? "My docs" : "Start free"}
           </Link>
           <button
             onClick={() => setOpen((v) => !v)}
@@ -69,13 +88,23 @@ export default function Navbar() {
                 {l.label}
               </Link>
             ))}
-            <Link
-              href="/editor/docs"
-              onClick={() => setOpen(false)}
-              className="rounded-md px-2 py-2.5 transition-colors hover:bg-white/5 hover:text-foreground"
-            >
-              Sign in
-            </Link>
+            {loggedIn ? (
+              <Link
+                href="/dashboard"
+                onClick={() => setOpen(false)}
+                className="rounded-md px-2 py-2.5 transition-colors hover:bg-white/5 hover:text-foreground"
+              >
+                Dashboard
+              </Link>
+            ) : (
+              <Link
+                href="/login"
+                onClick={() => setOpen(false)}
+                className="rounded-md px-2 py-2.5 transition-colors hover:bg-white/5 hover:text-foreground"
+              >
+                Sign in
+              </Link>
+            )}
           </div>
         </div>
       )}

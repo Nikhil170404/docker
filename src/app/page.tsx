@@ -92,7 +92,7 @@ export default function Home() {
             </p>
             <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/editor/docs"
+                href="/signup"
                 className="flex items-center gap-2 rounded-lg bg-white px-6 py-3 text-sm font-medium text-black transition-opacity hover:opacity-90"
               >
                 Start free <ArrowRight size={16} />
@@ -308,7 +308,7 @@ export default function Home() {
                 No install, no card, no waiting. Open the editor and go.
               </p>
               <Link
-                href="/editor/docs"
+                href="/signup"
                 className="mt-8 inline-flex items-center gap-2 rounded-lg bg-white px-6 py-3 text-sm font-medium text-black transition-opacity hover:opacity-90"
               >
                 Start free <ArrowRight size={16} />

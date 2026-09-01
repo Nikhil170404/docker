@@ -1,0 +1,31 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createSession, createUser, findUserByEmail, hashPassword } from "@/lib/auth";
+
+export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body.email !== "string" || typeof body.password !== "string" || typeof body.name !== "string") {
+    return NextResponse.json({ error: "name, email and password are required" }, { status: 400 });
+  }
+
+  const email = body.email.trim().toLowerCase();
+  const name = body.name.trim();
+  const password = body.password;
+
+  if (!email.includes("@") || password.length < 8) {
+    return NextResponse.json({ error: "Invalid email or password too short (min 8 chars)" }, { status: 400 });
+  }
+  if (!name) {
+    return NextResponse.json({ error: "Name is required" }, { status: 400 });
+  }
+
+  const existing = findUserByEmail(email);
+  if (existing) {
+    return NextResponse.json({ error: "An account with that email already exists" }, { status: 409 });
+  }
+
+  const passwordHash = await hashPassword(password);
+  const user = createUser(email, name, passwordHash);
+  await createSession({ id: user.id, email: user.email, name: user.name, plan: user.plan });
+
+  return NextResponse.json({ ok: true }, { status: 201 });
+}
