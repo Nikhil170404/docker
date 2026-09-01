@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { CalendarClock, CheckCircle2, Clock, XCircle, AlertCircle } from "lucide-react";
 import DashboardNav from "@/components/DashboardNav";
 import type { SessionUser } from "@/lib/auth";
 
@@ -14,111 +15,122 @@ interface Row {
   created_at: string;
 }
 
-interface Props {
-  session: SessionUser;
-  rows: Row[];
+function StatusBadge({ status }: { status: string }) {
+  if (status === "sent") return (
+    <span className="flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-400">
+      <CheckCircle2 size={10} /> Sent
+    </span>
+  );
+  if (status === "pending") return (
+    <span className="flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400">
+      <Clock size={10} /> Pending
+    </span>
+  );
+  if (status === "failed") return (
+    <span className="flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400">
+      <AlertCircle size={10} /> Failed
+    </span>
+  );
+  return (
+    <span className="flex items-center gap-1 rounded-full bg-border px-2 py-0.5 text-xs font-medium text-muted">
+      <XCircle size={10} /> Cancelled
+    </span>
+  );
 }
 
-const statusColors: Record<string, { bg: string; text: string }> = {
-  pending:   { bg: "#fef9c3", text: "#854d0e" },
-  sent:      { bg: "#dcfce7", text: "#166534" },
-  failed:    { bg: "#fee2e2", text: "#991b1b" },
-  cancelled: { bg: "#f1f5f9", text: "#64748b" },
-};
+function fmtDate(iso: string) {
+  return new Date(iso).toLocaleString("en-IN", {
+    day: "numeric", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
 
-export default function ScheduledClient({ session, rows: initialRows }: Props) {
+export default function ScheduledClient({ session, rows: initialRows }: { session: SessionUser; rows: Row[] }) {
   const [rows, setRows] = useState(initialRows);
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
   async function cancel(id: string) {
+    setCancelling(id);
     const res = await fetch(`/api/v1/scheduled/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setRows((prev) => prev.map((r) => (r.id === id ? { ...r, status: "cancelled" } : r)));
-    }
+    if (res.ok) setRows((prev) => prev.map((r) => r.id === id ? { ...r, status: "cancelled" } : r));
+    setCancelling(null);
   }
 
   const pending = rows.filter((r) => r.status === "pending").length;
   const sent = rows.filter((r) => r.status === "sent").length;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
+    <div className="min-h-screen bg-background">
       <DashboardNav session={session} />
-      <main style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>
-        <div style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", margin: 0 }}>Scheduled Sends</h1>
-          <p style={{ color: "#64748b", fontSize: 14, marginTop: 4 }}>
-            Schedule bulk emails from the Mail Merge page. They will be sent automatically at the chosen time.
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">Scheduled Sends</h1>
+          <p className="mt-1 text-sm text-muted">
+            Emails scheduled from Mail Merge will appear here and send automatically at the chosen time.
           </p>
         </div>
 
         {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 28 }}>
+        <div className="mb-8 grid grid-cols-3 gap-3">
           {[
-            { label: "Total", value: rows.length },
-            { label: "Pending", value: pending },
-            { label: "Sent", value: sent },
+            { label: "Total", value: rows.length, cls: "text-foreground" },
+            { label: "Pending", value: pending, cls: "text-amber-400" },
+            { label: "Sent", value: sent, cls: "text-green-400" },
           ].map((s) => (
-            <div key={s.label} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, padding: "20px 24px" }}>
-              <div style={{ fontSize: 28, fontWeight: 700, color: "#3b82f6" }}>{s.value}</div>
-              <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>{s.label}</div>
+            <div key={s.label} className="rounded-xl border border-border bg-surface p-4">
+              <p className={`text-2xl font-bold ${s.cls}`}>{s.value}</p>
+              <p className="mt-1 text-xs text-muted">{s.label}</p>
             </div>
           ))}
         </div>
 
-        <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden" }}>
-          {rows.length === 0 ? (
-            <div style={{ padding: "48px 24px", textAlign: "center", color: "#94a3b8" }}>
-              No scheduled sends yet. Use the Mail Merge page to schedule a bulk send.
-            </div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        {rows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
+            <CalendarClock size={40} className="mb-4 text-muted/40" />
+            <p className="text-sm text-muted">No scheduled sends</p>
+            <p className="mt-1 text-xs text-muted/60">Set a future send date in Mail Merge to schedule a batch</p>
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border bg-surface">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
                 <thead>
-                  <tr style={{ background: "#f8fafc" }}>
-                    {["Template", "Recipients", "Scheduled For", "Status", ""].map((h) => (
-                      <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 12, color: "#64748b", fontWeight: 600, borderBottom: "1px solid #e2e8f0" }}>
-                        {h}
-                      </th>
-                    ))}
+                  <tr className="border-b border-border text-xs text-muted">
+                    <th className="px-4 py-3 text-left font-medium">Template</th>
+                    <th className="px-4 py-3 text-left font-medium">Recipients</th>
+                    <th className="px-4 py-3 text-left font-medium">Scheduled For</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                    <th className="px-4 py-3 text-left font-medium"></th>
                   </tr>
                 </thead>
-                <tbody>
-                  {rows.map((r, i) => {
-                    const c = statusColors[r.status] ?? { bg: "#f1f5f9", text: "#64748b" };
-                    return (
-                      <tr key={r.id} style={{ borderBottom: i < rows.length - 1 ? "1px solid #f1f5f9" : "none" }}>
-                        <td style={{ padding: "12px 16px", fontSize: 14, color: "#1e293b", fontWeight: 500 }}>
-                          {r.template_title || "—"}
-                        </td>
-                        <td style={{ padding: "12px 16px", fontSize: 13, color: "#475569" }}>{r.recipient_count}</td>
-                        <td style={{ padding: "12px 16px", fontSize: 13, color: "#475569" }}>
-                          {new Date(r.scheduled_for).toLocaleString("en-IN", {
-                            day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
-                          })}
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          <span style={{ background: c.bg, color: c.text, fontSize: 11, padding: "2px 8px", borderRadius: 999, fontWeight: 600 }}>
-                            {r.status}
-                          </span>
-                          {r.error && <div style={{ fontSize: 11, color: "#dc2626", marginTop: 2 }}>{r.error}</div>}
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          {r.status === "pending" && (
-                            <button
-                              onClick={() => cancel(r.id)}
-                              style={{ fontSize: 12, color: "#dc2626", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
-                            >
-                              Cancel
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                <tbody className="divide-y divide-border">
+                  {rows.map((r) => (
+                    <tr key={r.id} className="hover:bg-white/[0.02]">
+                      <td className="px-4 py-3 font-medium text-foreground">{r.template_title || "—"}</td>
+                      <td className="px-4 py-3 text-muted">{r.recipient_count.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-muted">{fmtDate(r.scheduled_for)}</td>
+                      <td className="px-4 py-3">
+                        <StatusBadge status={r.status} />
+                        {r.error && <p className="mt-0.5 max-w-xs truncate text-xs text-red-400">{r.error}</p>}
+                      </td>
+                      <td className="px-4 py-3">
+                        {r.status === "pending" && (
+                          <button
+                            onClick={() => cancel(r.id)}
+                            disabled={cancelling === r.id}
+                            className="text-xs text-red-400 transition-opacity hover:opacity-70 disabled:opacity-40"
+                          >
+                            {cancelling === r.id ? "Cancelling…" : "Cancel"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );

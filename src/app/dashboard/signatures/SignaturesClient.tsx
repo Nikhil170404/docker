@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { PenLine, Copy, Search, CheckCircle2, Clock, XCircle } from "lucide-react";
 import DashboardNav from "@/components/DashboardNav";
 import type { SessionUser } from "@/lib/auth";
 
@@ -15,127 +16,134 @@ interface SignRequest {
   expires_at: string;
 }
 
-interface Props {
-  session: SessionUser;
-  requests: SignRequest[];
-}
-
 function StatusBadge({ status, expires_at }: { status: string; expires_at: string }) {
   const expired = status === "pending" && new Date(expires_at) < new Date();
-  const label = expired ? "expired" : status;
-  const colors: Record<string, { bg: string; text: string }> = {
-    signed:  { bg: "#dcfce7", text: "#166534" },
-    pending: { bg: "#fef9c3", text: "#854d0e" },
-    expired: { bg: "#fee2e2", text: "#991b1b" },
-  };
-  const c = colors[label] ?? { bg: "#f1f5f9", text: "#475569" };
+  if (status === "signed") return (
+    <span className="flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-400">
+      <CheckCircle2 size={10} /> Signed
+    </span>
+  );
+  if (expired) return (
+    <span className="flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400">
+      <XCircle size={10} /> Expired
+    </span>
+  );
   return (
-    <span style={{ background: c.bg, color: c.text, fontSize: 11, padding: "2px 8px", borderRadius: 999, fontWeight: 600 }}>
-      {label}
+    <span className="flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400">
+      <Clock size={10} /> Pending
     </span>
   );
 }
 
-const base = typeof window !== "undefined" ? window.location.origin : "";
-
-export default function SignaturesClient({ session, requests }: Props) {
+export default function SignaturesClient({ session, requests }: { session: SessionUser; requests: SignRequest[] }) {
   const [search, setSearch] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
 
-  const filtered = requests.filter((r) =>
-    !search ||
-    r.recipient_email.toLowerCase().includes(search.toLowerCase()) ||
-    r.doc_title.toLowerCase().includes(search.toLowerCase()) ||
-    r.recipient_name.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = search
+    ? requests.filter((r) =>
+        r.recipient_email.toLowerCase().includes(search.toLowerCase()) ||
+        r.doc_title.toLowerCase().includes(search.toLowerCase()) ||
+        r.recipient_name.toLowerCase().includes(search.toLowerCase())
+      )
+    : requests;
 
   const total = requests.length;
   const signed = requests.filter((r) => r.status === "signed").length;
   const pending = requests.filter((r) => r.status === "pending" && new Date(r.expires_at) >= new Date()).length;
+  const expired = requests.filter((r) => r.status === "pending" && new Date(r.expires_at) < new Date()).length;
 
   function copyLink(token: string) {
     const url = `${window.location.origin}/sign/${token}`;
-    navigator.clipboard.writeText(url).then(() => alert("Signing link copied!")).catch(() => {});
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(token);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  }
+
+  function fmt(iso: string) {
+    return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
+    <div className="min-h-screen bg-background">
       <DashboardNav session={session} />
-      <main style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>
-        <div style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", margin: 0 }}>E-Signatures</h1>
-          <p style={{ color: "#64748b", fontSize: 14, marginTop: 4 }}>Track and manage all your signature requests</p>
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">E-Signatures</h1>
+          <p className="mt-1 text-sm text-muted">Track and manage all your document signing requests</p>
         </div>
 
         {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 28 }}>
+        <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
-            { label: "Total Sent", value: total, color: "#3b82f6" },
-            { label: "Signed", value: signed, color: "#16a34a" },
-            { label: "Pending", value: pending, color: "#d97706" },
+            { label: "Total", value: total, cls: "text-foreground" },
+            { label: "Signed", value: signed, cls: "text-green-400" },
+            { label: "Pending", value: pending, cls: "text-amber-400" },
+            { label: "Expired", value: expired, cls: "text-red-400" },
           ].map((s) => (
-            <div key={s.label} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, padding: "20px 24px" }}>
-              <div style={{ fontSize: 28, fontWeight: 700, color: s.color }}>{s.value}</div>
-              <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>{s.label}</div>
+            <div key={s.label} className="rounded-xl border border-border bg-surface p-4">
+              <p className={`text-2xl font-bold ${s.cls}`}>{s.value}</p>
+              <p className="mt-1 text-xs text-muted">{s.label}</p>
             </div>
           ))}
         </div>
 
-        {/* Table */}
-        <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden" }}>
-          <div style={{ padding: "16px 20px", borderBottom: "1px solid #e2e8f0" }}>
-            <input
-              type="text"
-              placeholder="Search by name, email or document..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ width: "100%", padding: "8px 12px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 14, outline: "none" }}
-            />
-          </div>
+        {/* Search */}
+        <div className="relative mb-4">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name, email or document…"
+            className="w-full rounded-lg border border-border bg-surface py-2.5 pl-9 pr-3 text-sm text-foreground placeholder:text-muted focus:border-accent focus:outline-none"
+          />
+        </div>
 
-          {filtered.length === 0 ? (
-            <div style={{ padding: "48px 24px", textAlign: "center", color: "#94a3b8" }}>
-              {search ? "No results match your search." : "No signature requests yet. Create one from the Mail Merge page."}
-            </div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        {requests.length === 0 ? (
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
+            <PenLine size={40} className="mb-4 text-muted/40" />
+            <p className="text-sm text-muted">No signature requests yet</p>
+            <p className="mt-1 text-xs text-muted/60">Create a signing request from the Mail Merge page</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <p className="py-10 text-center text-sm text-muted">No results for &quot;{search}&quot;</p>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border bg-surface">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
                 <thead>
-                  <tr style={{ background: "#f8fafc" }}>
-                    {["Recipient", "Document", "Sent", "Expires", "Status", ""].map((h) => (
-                      <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 12, color: "#64748b", fontWeight: 600, borderBottom: "1px solid #e2e8f0" }}>
-                        {h}
-                      </th>
-                    ))}
+                  <tr className="border-b border-border text-xs text-muted">
+                    <th className="px-4 py-3 text-left font-medium">Recipient</th>
+                    <th className="px-4 py-3 text-left font-medium">Document</th>
+                    <th className="hidden px-4 py-3 text-left font-medium sm:table-cell">Sent</th>
+                    <th className="hidden px-4 py-3 text-left font-medium md:table-cell">Expires</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                    <th className="px-4 py-3 text-left font-medium">Link</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-border">
                   {filtered.map((r) => (
-                    <tr key={r.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                      <td style={{ padding: "12px 16px" }}>
-                        <div style={{ fontSize: 14, color: "#1e293b", fontWeight: 500 }}>{r.recipient_name || r.recipient_email}</div>
-                        {r.recipient_name && <div style={{ fontSize: 12, color: "#94a3b8" }}>{r.recipient_email}</div>}
+                    <tr key={r.id} className="hover:bg-white/[0.02]">
+                      <td className="px-4 py-3">
+                        <p className="font-medium text-foreground">{r.recipient_name || r.recipient_email}</p>
+                        {r.recipient_name && <p className="text-xs text-muted">{r.recipient_email}</p>}
                       </td>
-                      <td style={{ padding: "12px 16px", fontSize: 13, color: "#475569" }}>{r.doc_title}</td>
-                      <td style={{ padding: "12px 16px", fontSize: 12, color: "#94a3b8" }}>
-                        {new Date(r.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                      </td>
-                      <td style={{ padding: "12px 16px", fontSize: 12, color: "#94a3b8" }}>
-                        {new Date(r.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                      </td>
-                      <td style={{ padding: "12px 16px" }}>
+                      <td className="max-w-[180px] truncate px-4 py-3 text-muted">{r.doc_title}</td>
+                      <td className="hidden px-4 py-3 text-xs text-muted sm:table-cell">{fmt(r.created_at)}</td>
+                      <td className="hidden px-4 py-3 text-xs text-muted md:table-cell">{fmt(r.expires_at)}</td>
+                      <td className="px-4 py-3">
                         <StatusBadge status={r.status} expires_at={r.expires_at} />
                         {r.signed_at && (
-                          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
-                            {new Date(r.signed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
-                          </div>
+                          <p className="mt-0.5 text-xs text-muted">{fmt(r.signed_at)}</p>
                         )}
                       </td>
-                      <td style={{ padding: "12px 16px" }}>
+                      <td className="px-4 py-3">
                         <button
                           onClick={() => copyLink(r.doc_token)}
-                          style={{ fontSize: 12, color: "#3b82f6", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                          className="flex items-center gap-1 text-xs text-accent transition-opacity hover:opacity-80"
                         >
-                          Copy link
+                          <Copy size={11} />
+                          {copied === r.doc_token ? "Copied!" : "Copy link"}
                         </button>
                       </td>
                     </tr>
@@ -143,8 +151,8 @@ export default function SignaturesClient({ session, requests }: Props) {
                 </tbody>
               </table>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { KeyRound, User, Lock, Eye, EyeOff, Trash2, Plus } from "lucide-react";
 import DashboardNav from "@/components/DashboardNav";
 import type { SessionUser } from "@/lib/auth";
 
@@ -10,87 +11,84 @@ interface ApiKey {
   created_at: string;
 }
 
-interface Props {
-  session: SessionUser;
-  apiKeys: ApiKey[];
-}
+const inputCls = "w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
+const labelCls = "block text-sm font-medium text-foreground mb-1.5";
+const btnPrimary = "rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50";
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ icon: Icon, title, children }: { icon: React.ElementType; title: string; children: React.ReactNode }) {
   return (
-    <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "24px 28px", marginBottom: 24 }}>
-      <div style={{ fontSize: 16, fontWeight: 600, color: "#0f172a", marginBottom: 20 }}>{title}</div>
+    <div className="rounded-xl border border-border bg-surface p-6 mb-4">
+      <div className="mb-5 flex items-center gap-2.5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/15 text-accent">
+          <Icon size={15} />
+        </div>
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+      </div>
       {children}
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "9px 12px",
-  border: "1px solid #d1d5db",
-  borderRadius: 8,
-  fontSize: 14,
-  outline: "none",
-  boxSizing: "border-box",
-};
-
-const btnPrimary: React.CSSProperties = {
-  padding: "9px 20px",
-  background: "#3b82f6",
-  color: "#fff",
-  border: "none",
-  borderRadius: 8,
-  fontSize: 14,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-export default function SettingsClient({ session, apiKeys: initialKeys }: Props) {
+export default function SettingsClient({ session, apiKeys: initialKeys }: { session: SessionUser; apiKeys: ApiKey[] }) {
   const [name, setName] = useState(session.name);
-  const [profileMsg, setProfileMsg] = useState("");
+  const [profileMsg, setProfileMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [savingProfile, setSavingProfile] = useState(false);
 
   const [curPwd, setCurPwd] = useState("");
   const [newPwd, setNewPwd] = useState("");
-  const [pwdMsg, setPwdMsg] = useState("");
+  const [showCur, setShowCur] = useState(false);
+  const [showNew, setShowNew] = useState(false);
+  const [pwdMsg, setPwdMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [savingPwd, setSavingPwd] = useState(false);
 
   const [keys, setKeys] = useState(initialKeys.filter((k) => !k.revoked));
   const [keyLabel, setKeyLabel] = useState("");
   const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
-  const [keyMsg, setKeyMsg] = useState("");
+  const [keyMsg, setKeyMsg] = useState<string | null>(null);
+  const [creatingKey, setCreatingKey] = useState(false);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
-    setProfileMsg("");
-    const res = await fetch("/api/v1/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-    setProfileMsg(res.ok ? "Profile updated." : "Failed to update.");
+    setSavingProfile(true);
+    setProfileMsg(null);
+    const res = await fetch("/api/v1/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    setProfileMsg(res.ok ? { text: "Profile updated.", ok: true } : { text: "Failed to update profile.", ok: false });
+    setSavingProfile(false);
   }
 
   async function changePassword(e: React.FormEvent) {
     e.preventDefault();
-    setPwdMsg("");
-    const res = await fetch("/api/v1/settings/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ currentPassword: curPwd, newPassword: newPwd }) });
+    setSavingPwd(true);
+    setPwdMsg(null);
+    const res = await fetch("/api/v1/settings/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currentPassword: curPwd, newPassword: newPwd }),
+    });
     if (res.ok) {
-      setPwdMsg("Password changed successfully.");
+      setPwdMsg({ text: "Password changed successfully.", ok: true });
       setCurPwd(""); setNewPwd("");
     } else {
       const j = await res.json().catch(() => ({}));
-      setPwdMsg(j.error ?? "Failed to change password.");
+      setPwdMsg({ text: j.error ?? "Failed to change password.", ok: false });
     }
+    setSavingPwd(false);
   }
 
   async function createKey(e: React.FormEvent) {
     e.preventDefault();
-    setKeyMsg(""); setNewKeyValue(null);
-    const res = await fetch("/api/v1/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: keyLabel || "API Key" }) });
+    setCreatingKey(true);
+    setKeyMsg(null);
+    setNewKeyValue(null);
+    const res = await fetch("/api/v1/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: keyLabel || "API Key" }),
+    });
     if (res.ok) {
       const j = await res.json();
       setNewKeyValue(j.key);
@@ -99,103 +97,158 @@ export default function SettingsClient({ session, apiKeys: initialKeys }: Props)
     } else {
       setKeyMsg("Failed to create API key.");
     }
+    setCreatingKey(false);
   }
 
   async function revokeKey(id: string) {
+    if (!confirm("Revoke this API key? This cannot be undone.")) return;
     const res = await fetch(`/api/v1/keys/${id}`, { method: "DELETE" });
     if (res.ok) setKeys((prev) => prev.filter((k) => k.id !== id));
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
+    <div className="min-h-screen bg-background">
       <DashboardNav session={session} />
-      <main style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
-        <div style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", margin: 0 }}>Settings</h1>
-          <p style={{ color: "#64748b", fontSize: 14, marginTop: 4 }}>Manage your profile and API access</p>
+      <main className="mx-auto max-w-2xl px-4 py-8 sm:px-6 sm:py-10">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">Settings</h1>
+          <p className="mt-1 text-sm text-muted">Manage your profile, password and API access</p>
         </div>
 
         {/* Profile */}
-        <Section title="Profile">
-          <form onSubmit={saveProfile}>
-            <Field label="Name">
-              <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} required />
-            </Field>
-            <Field label="Email">
-              <input style={{ ...inputStyle, background: "#f9fafb", color: "#94a3b8" }} value={session.email} disabled />
-            </Field>
-            <button type="submit" style={btnPrimary}>Save Profile</button>
-            {profileMsg && <span style={{ marginLeft: 12, fontSize: 13, color: profileMsg.includes("updated") ? "#16a34a" : "#dc2626" }}>{profileMsg}</span>}
+        <Section icon={User} title="Profile">
+          <form onSubmit={saveProfile} className="flex flex-col gap-4">
+            <div>
+              <label className={labelCls}>Full name</label>
+              <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} required />
+            </div>
+            <div>
+              <label className={labelCls}>Email address</label>
+              <input className={`${inputCls} cursor-not-allowed opacity-50`} value={session.email} disabled />
+              <p className="mt-1 text-xs text-muted">Email cannot be changed.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="submit" disabled={savingProfile} className={btnPrimary}>
+                {savingProfile ? "Saving…" : "Save profile"}
+              </button>
+              {profileMsg && (
+                <span className={`text-sm ${profileMsg.ok ? "text-green-400" : "text-red-400"}`}>{profileMsg.text}</span>
+              )}
+            </div>
           </form>
         </Section>
 
         {/* Password */}
-        <Section title="Change Password">
-          <form onSubmit={changePassword}>
-            <Field label="Current Password">
-              <input style={inputStyle} type="password" value={curPwd} onChange={(e) => setCurPwd(e.target.value)} required />
-            </Field>
-            <Field label="New Password">
-              <input style={inputStyle} type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} minLength={8} required placeholder="At least 8 characters" />
-            </Field>
-            <button type="submit" style={btnPrimary}>Change Password</button>
-            {pwdMsg && <span style={{ marginLeft: 12, fontSize: 13, color: pwdMsg.includes("success") ? "#16a34a" : "#dc2626" }}>{pwdMsg}</span>}
+        <Section icon={Lock} title="Change Password">
+          <form onSubmit={changePassword} className="flex flex-col gap-4">
+            <div>
+              <label className={labelCls}>Current password</label>
+              <div className="relative">
+                <input
+                  className={inputCls}
+                  type={showCur ? "text" : "password"}
+                  value={curPwd}
+                  onChange={(e) => setCurPwd(e.target.value)}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCur((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-foreground"
+                  tabIndex={-1}
+                >
+                  {showCur ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>New password</label>
+              <div className="relative">
+                <input
+                  className={inputCls}
+                  type={showNew ? "text" : "password"}
+                  value={newPwd}
+                  onChange={(e) => setNewPwd(e.target.value)}
+                  minLength={8}
+                  required
+                  placeholder="At least 8 characters"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNew((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-foreground"
+                  tabIndex={-1}
+                >
+                  {showNew ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="submit" disabled={savingPwd} className={btnPrimary}>
+                {savingPwd ? "Saving…" : "Change password"}
+              </button>
+              {pwdMsg && (
+                <span className={`text-sm ${pwdMsg.ok ? "text-green-400" : "text-red-400"}`}>{pwdMsg.text}</span>
+              )}
+            </div>
           </form>
         </Section>
 
         {/* API Keys */}
-        <Section title="API Keys">
-          <p style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>
-            Use API keys to send emails programmatically. The key is shown <strong>once</strong> — copy it immediately.
+        <Section icon={KeyRound} title="API Keys">
+          <p className="mb-4 text-sm text-muted">
+            Use API keys to authenticate requests to the DocKaro API. Keys are shown <strong className="text-foreground">once</strong> at creation — copy it immediately.
           </p>
-          <form onSubmit={createKey} style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+
+          <form onSubmit={createKey} className="mb-4 flex gap-2">
             <input
-              style={{ ...inputStyle, flex: 1 }}
-              placeholder="Key label (e.g. Production)"
+              className={`${inputCls} flex-1`}
+              placeholder="Key label (e.g. Production, CI)"
               value={keyLabel}
               onChange={(e) => setKeyLabel(e.target.value)}
             />
-            <button type="submit" style={btnPrimary}>Create Key</button>
+            <button type="submit" disabled={creatingKey} className={`${btnPrimary} flex shrink-0 items-center gap-1.5`}>
+              <Plus size={13} /> {creatingKey ? "Creating…" : "Create"}
+            </button>
           </form>
-          {keyMsg && <p style={{ fontSize: 13, color: "#dc2626" }}>{keyMsg}</p>}
+
+          {keyMsg && <p className="mb-3 text-sm text-red-400">{keyMsg}</p>}
+
           {newKeyValue && (
-            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "14px 16px", marginBottom: 16 }}>
-              <div style={{ fontSize: 12, color: "#166534", fontWeight: 600, marginBottom: 6 }}>New API Key — copy now, it won't be shown again</div>
-              <div style={{ fontFamily: "monospace", fontSize: 13, wordBreak: "break-all", color: "#15803d" }}>{newKeyValue}</div>
+            <div className="mb-4 rounded-lg border border-green-500/30 bg-green-500/10 p-4">
+              <p className="mb-2 text-xs font-semibold text-green-400">New key — copy it now, it won&apos;t be shown again</p>
+              <code className="block break-all rounded bg-black/30 px-3 py-2 font-mono text-xs text-green-300">
+                {newKeyValue}
+              </code>
               <button
                 onClick={() => navigator.clipboard.writeText(newKeyValue!)}
-                style={{ marginTop: 8, fontSize: 12, color: "#16a34a", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                className="mt-2 text-xs text-green-400 underline hover:opacity-70"
               >
                 Copy to clipboard
               </button>
             </div>
           )}
+
           {keys.length === 0 ? (
-            <p style={{ fontSize: 13, color: "#94a3b8" }}>No active API keys.</p>
+            <p className="text-sm text-muted">No active API keys. Create one above.</p>
           ) : (
-            <div style={{ border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+            <div className="overflow-hidden rounded-lg border border-border">
               {keys.map((k, i) => (
                 <div
                   key={k.id}
-                  style={{
-                    padding: "12px 16px",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderBottom: i < keys.length - 1 ? "1px solid #f1f5f9" : "none",
-                  }}
+                  className={`flex items-center justify-between gap-4 px-4 py-3 ${i < keys.length - 1 ? "border-b border-border" : ""}`}
                 >
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 500, color: "#1e293b" }}>{k.label}</div>
-                    <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                    <p className="text-sm font-medium text-foreground">{k.label}</p>
+                    <p className="text-xs text-muted">
                       Created {new Date(k.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                    </div>
+                    </p>
                   </div>
                   <button
                     onClick={() => revokeKey(k.id)}
-                    style={{ fontSize: 12, color: "#dc2626", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                    className="flex items-center gap-1 text-xs text-red-400 transition-opacity hover:opacity-70"
                   >
-                    Revoke
+                    <Trash2 size={11} /> Revoke
                   </button>
                 </div>
               ))}
