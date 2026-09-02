@@ -186,6 +186,73 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       span.replaceWith(el);
     });
 
+    // ⑤ Track changes: strip deleted text, unwrap inserted text
+    p0.querySelectorAll("del").forEach((el) => el.remove());
+    p0.querySelectorAll<HTMLElement>('[class*="MsoDelText"], [class*="msoDel"]').forEach((el) => el.remove());
+    p0.querySelectorAll("ins").forEach((ins) => {
+      const frag = p0.createDocumentFragment();
+      while (ins.firstChild) frag.appendChild(ins.firstChild);
+      ins.replaceWith(frag);
+    });
+
+    // ⑥ Footnotes/endnotes: extract footnote text and append as a section at bottom.
+    // Word HTML places footnote markers as <a href="#_ftn1"> in body text and
+    // the actual footnote content in a div[style*="mso-element:footnote-list"].
+    const footnoteContainer = p0.querySelector<HTMLElement>('[style*="mso-element:footnote-list"], [style*="mso-element:endnote-list"]');
+    if (footnoteContainer) {
+      const entries: { num: string; text: string }[] = [];
+      footnoteContainer.querySelectorAll<HTMLElement>('[style*="mso-element:footnote"], [style*="mso-element:endnote"]').forEach((fn) => {
+        const numEl = fn.querySelector("a[href]") ?? fn.querySelector("sup");
+        const num = (numEl?.textContent ?? "").trim() || String(entries.length + 1);
+        fn.querySelectorAll("a").forEach((a) => a.remove());
+        const text = fn.textContent?.trim() ?? "";
+        if (text) entries.push({ num, text });
+      });
+      footnoteContainer.remove();
+      if (entries.length > 0) {
+        const hr = p0.createElement("hr");
+        p0.body.appendChild(hr);
+        const sect = p0.createElement("div");
+        sect.style.cssText = "font-size:10pt; margin-top:8pt;";
+        entries.forEach(({ num, text }) => {
+          const p = p0.createElement("p");
+          const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          p.innerHTML = `<sup>${num}</sup>&nbsp;${escaped}`;
+          sect.appendChild(p);
+        });
+        p0.body.appendChild(sect);
+      }
+    }
+
+    // ⑦ Floating / absolutely-positioned images → inline
+    // Word's clipboard HTML wraps floating images in <v:shape> with an
+    // <!--[if !vml]--> fallback <img position:absolute>. We keep the img (via
+    // the $1 substitution in Phase 2) but must strip the absolute positioning.
+    p0.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      const pos = img.style.position;
+      if (pos === "absolute" || pos === "fixed") {
+        img.style.removeProperty("position");
+        img.style.removeProperty("left");
+        img.style.removeProperty("top");
+        img.style.removeProperty("z-index");
+        img.style.removeProperty("margin-left");
+        img.style.removeProperty("margin-top");
+      }
+      const fl = img.style.float;
+      if (fl === "left" || fl === "right") {
+        img.style.removeProperty("float");
+        img.style.display = "block";
+        img.style.margin = "4pt 0";
+      }
+      if (!img.style.maxWidth) img.style.maxWidth = "100%";
+    });
+    // Also handle wrapping <span>/<p> that are position:absolute (image anchors)
+    p0.querySelectorAll<HTMLElement>('span[style*="position:absolute"], p[style*="position:absolute"]').forEach((el) => {
+      el.style.removeProperty("position");
+      el.style.removeProperty("left");
+      el.style.removeProperty("top");
+    });
+
     working = p0.body.innerHTML;
   } catch { /* DOMParser unavailable */ }
 
@@ -234,6 +301,36 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       (tr as HTMLElement).style.removeProperty("height");
     });
 
+    // line-height: convert pt → px and % → unitless ratio so Univer parses correctly
+    tmpDoc.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      const lh = el.style?.lineHeight;
+      if (!lh) return;
+      if (lh.endsWith("pt")) {
+        el.style.lineHeight = `${Math.round(parseFloat(lh) * 1.3333)}px`;
+      } else if (lh.endsWith("%")) {
+        el.style.lineHeight = (parseFloat(lh) / 100).toFixed(2);
+      }
+    });
+
+    // letter-spacing: pt → px
+    tmpDoc.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      const ls = el.style?.letterSpacing;
+      if (ls && ls.endsWith("pt")) {
+        el.style.letterSpacing = `${(parseFloat(ls) * 1.3333).toFixed(1)}px`;
+      }
+    });
+
+    // paragraph-level spacing: margin-top/bottom pt → px
+    tmpDoc.querySelectorAll<HTMLElement>("p, h1, h2, h3, h4, h5, li").forEach((el) => {
+      ["marginTop", "marginBottom"].forEach((prop) => {
+        const val: string = (el.style as unknown as Record<string, string>)[prop] ?? "";
+        if (val.endsWith("pt")) {
+          (el.style as unknown as Record<string, string>)[prop] =
+            `${Math.round(parseFloat(val) * 1.3333)}px`;
+        }
+      });
+    });
+
     // text-transform:uppercase → bake uppercase text before stripping styles
     tmpDoc.querySelectorAll<HTMLElement>("*").forEach((el) => {
       if (el.style?.textTransform === "uppercase") {
@@ -257,6 +354,9 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       (table as HTMLElement).style.setProperty("width", "100%");
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
       const isBorderless = table.getAttribute("border") === "0";
+      // Word marks merged-cell "phantom" placeholders with display:none — remove them
+      // so Univer doesn't render empty phantom cells as visible blank columns.
+      table.querySelectorAll<HTMLElement>("td[style*='display:none'], td[style*='display: none']").forEach((td) => td.remove());
       const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
       cells.forEach((cell) => {
         const cellW = parseFloat(cell.style.width) || parseFloat(cell.getAttribute("width") || "") || 0;
