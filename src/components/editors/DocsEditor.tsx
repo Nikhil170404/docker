@@ -79,12 +79,17 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       p.replaceWith(h);
     });
 
-    // ② Word list paragraphs → <ul>/<ol>/<li>
+    // ② Word list paragraphs → <ul>/<ol>/<li> (supports multi-level via mso-list:lX levelN)
     (function convertWordLists(doc: Document) {
+      const parseMsoList = (el: HTMLElement): { listId: string; level: number } | null => {
+        const style = el.getAttribute("style") ?? "";
+        const m = style.match(/mso-list:\s*l(\d+)\s+level(\d+)/i);
+        if (m) return { listId: m[1], level: Number(m[2]) };
+        if (/MsoListParagraph/i.test(el.className)) return { listId: "0", level: 1 };
+        return null;
+      };
       const isWordListPara = (el: Element): el is HTMLElement =>
-        el.tagName === "P" &&
-        ((el.getAttribute("style") ?? "").includes("mso-list:") ||
-          /MsoListParagraph/i.test((el as HTMLElement).className));
+        el.tagName === "P" && parseMsoList(el as HTMLElement) !== null;
       const containers = new Set<Element>();
       doc.querySelectorAll("p").forEach((p) => {
         if (isWordListPara(p)) containers.add(p.parentElement ?? doc.body);
@@ -96,11 +101,19 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
           if (!isWordListPara(kids[i])) { i++; continue; }
           const group: HTMLElement[] = [];
           while (i < kids.length && isWordListPara(kids[i])) { group.push(kids[i] as HTMLElement); i++; }
-          const ignoreSpan = group[0].querySelector<HTMLElement>('[style*="mso-list:Ignore"]');
-          const markerText = (ignoreSpan?.textContent ?? "").replace(/\s/g, "");
-          const ordered = /^[0-9]+[.)]|^[a-zA-Z]{1,3}[.)]/.test(markerText);
-          const listEl = doc.createElement(ordered ? "ol" : "ul");
+
+          // Determine top-level list type from first item's marker
+          const firstIgnore = group[0].querySelector<HTMLElement>('[style*="mso-list:Ignore"]');
+          const firstMarker = (firstIgnore?.textContent ?? "").replace(/\s/g, "");
+          const firstOrdered = /^[0-9]+[.)]|^[a-zA-Z]{1,3}[.)]/.test(firstMarker);
+
+          // Build nested structure: stack[level-1] = current list at that level
+          const rootList = doc.createElement(firstOrdered ? "ol" : "ul");
+          const listStack: HTMLUListElement[] = [rootList as unknown as HTMLUListElement];
+
           group.forEach((p) => {
+            const info = parseMsoList(p) ?? { listId: "0", level: 1 };
+            const level = Math.max(1, info.level);
             p.querySelectorAll('[style*="mso-list:Ignore"]').forEach((s) => s.remove());
             const li = doc.createElement("li");
             li.innerHTML = p.innerHTML;
@@ -109,26 +122,54 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
             const rawStyle = (p.getAttribute("style") ?? "").split(";")
               .filter((s) => s.trim() && !/^mso-|text-indent/i.test(s.trim())).join("; ").trim();
             if (rawStyle) li.setAttribute("style", rawStyle);
-            listEl.appendChild(li);
+
+            while (listStack.length < level) {
+              // Need a deeper list: append to last li of current deepest list
+              const parent = listStack[listStack.length - 1];
+              const lastLi = parent.lastElementChild ?? parent.appendChild(doc.createElement("li"));
+              const nested = doc.createElement("ul") as unknown as HTMLUListElement;
+              lastLi.appendChild(nested);
+              listStack.push(nested);
+            }
+            while (listStack.length > level) listStack.pop();
+            listStack[listStack.length - 1].appendChild(li);
           });
-          group[0].replaceWith(listEl);
+
+          group[0].replaceWith(rootList);
           group.slice(1).forEach((el) => el.remove());
         }
       }
     })(p0);
 
     // ③ <br> inside paragraphs → paragraph splits
+    // When a <br> is inside a <span>, siblings after it must be re-wrapped in
+    // a clone of that span so formatting (font, bold, color) is preserved.
     p0.querySelectorAll("p").forEach((p) => {
-      const brs = p.querySelectorAll("br");
+      const brs = [...p.querySelectorAll("br")];
       if (brs.length === 0) return;
       brs.forEach((br) => {
         const newP = p0.createElement("p");
         const cls = p.getAttribute("class"); const sty = p.getAttribute("style");
         if (cls) newP.setAttribute("class", cls);
         if (sty) newP.setAttribute("style", sty);
-        let next = br.nextSibling;
-        while (next) { const tmp = next.nextSibling; newP.appendChild(next); next = tmp; }
-        br.remove();
+        // If the <br> is inside a span, wrap trailing siblings in a clone of that span
+        const parentSpan = br.parentElement !== p && br.parentElement?.tagName === "SPAN"
+          ? br.parentElement : null;
+        if (parentSpan) {
+          // Move nodes after the br that are inside the span into a new span clone
+          const spanClone = parentSpan.cloneNode(false) as HTMLElement;
+          let next = br.nextSibling;
+          while (next) { const tmp = next.nextSibling; spanClone.appendChild(next); next = tmp; }
+          br.remove();
+          parentSpan.insertAdjacentElement("afterend", spanClone);
+          // Now move the span clone and everything after it into newP
+          let after: ChildNode | null = spanClone;
+          while (after) { const tmp = after.nextSibling; newP.appendChild(after); after = tmp; }
+        } else {
+          let next = br.nextSibling;
+          while (next) { const tmp = next.nextSibling; newP.appendChild(next); next = tmp; }
+          br.remove();
+        }
         p.insertAdjacentElement("afterend", newP);
       });
     });
@@ -193,8 +234,23 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       (tr as HTMLElement).style.removeProperty("height");
     });
 
+    // text-transform:uppercase → bake uppercase text before stripping styles
+    tmpDoc.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      if (el.style?.textTransform === "uppercase") {
+        el.childNodes.forEach((node) => {
+          if (node.nodeType === Node.TEXT_NODE && node.textContent) {
+            node.textContent = node.textContent.toUpperCase();
+          }
+        });
+        el.style.removeProperty("text-transform");
+      }
+    });
+
     // Table width normalisation: 100% table, proportional px cells
     tmpDoc.querySelectorAll("table").forEach((table) => {
+      // Remove <colgroup>/<col> — Univer reads col widths first and would
+      // override our scaled cell widths computed below.
+      table.querySelectorAll("colgroup, col").forEach((el) => el.remove());
       const totalW = parseFloat((table as HTMLElement).style.width) || parseFloat(table.getAttribute("width") || "") || 0;
       table.removeAttribute("width");
       (table as HTMLElement).style.removeProperty("width");
@@ -227,6 +283,15 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
           cell.appendChild(ph);
         }
       });
+    });
+
+    // Headings: preserve heading semantics via data-heading attribute so
+    // Univer's getHeadingNamedStyleType fires, while also adding UniverNormal
+    // for paragraph style resolution (text-align, line-height, spacing).
+    tmpDoc.querySelectorAll("h1, h2, h3, h4, h5").forEach((h) => {
+      const level = h.tagName.toLowerCase();
+      (h as HTMLElement).setAttribute("data-heading", level);
+      (h as HTMLElement).className = ((h as HTMLElement).className + " UniverNormal").trim();
     });
 
     // UniverNormal triggers getParagraphStyle() for text-align, line-height, margins
