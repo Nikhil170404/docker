@@ -400,11 +400,32 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
     });
 
     // Table width normalisation: 100% table, proportional px cells
+    // Width values here can be plain numbers (px/pt-ish, historically
+    // treated as px), or a CSS percentage — `width: 100%` is the single
+    // most common table width Google Docs emits. parseFloat("100%") is
+    // 100, so treating that as a raw pixel count (rather than 100% of the
+    // page) rendered a full-width table barely 100px wide — every column
+    // just a few characters across, text wrapping one letter per line.
+    // Confirmed by pasting a 3-column table with no per-cell widths, only
+    // `width: 100%` on the <table>: every cell collapsed to ~40px.
+    const PAGE_CONTENT_WIDTH = 660;
+    const parseWidthPx = (value: string, referencePx: number): number => {
+      const trimmed = value.trim();
+      if (!trimmed) return 0;
+      if (trimmed.endsWith("%")) {
+        const pct = parseFloat(trimmed);
+        return Number.isFinite(pct) ? (pct / 100) * referencePx : 0;
+      }
+      const px = parseFloat(trimmed);
+      return Number.isFinite(px) ? px : 0;
+    };
     tmpDoc.querySelectorAll("table").forEach((table) => {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
       // override our scaled cell widths computed below.
       table.querySelectorAll("colgroup, col").forEach((el) => el.remove());
-      const totalW = parseFloat((table as HTMLElement).style.width) || parseFloat(table.getAttribute("width") || "") || 0;
+      const totalW =
+        parseWidthPx((table as HTMLElement).style.width, PAGE_CONTENT_WIDTH) ||
+        parseWidthPx(table.getAttribute("width") || "", PAGE_CONTENT_WIDTH);
       table.removeAttribute("width");
       (table as HTMLElement).style.removeProperty("width");
       // A table's own declared width was being discarded outright in favor
@@ -418,7 +439,6 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       // instead, and cells scale against that same target so the two never
       // disagree with each other the way they would if only one honored
       // the source width.
-      const PAGE_CONTENT_WIDTH = 660;
       const tableTargetWidth = totalW > 0 ? Math.min(totalW, PAGE_CONTENT_WIDTH) : PAGE_CONTENT_WIDTH;
       (table as HTMLElement).style.setProperty("width", `${tableTargetWidth}px`);
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
@@ -440,7 +460,9 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         hasNoBorder(table) ||
         (cells.length > 0 && cells.every(hasNoBorder));
       cells.forEach((cell) => {
-        const cellW = parseFloat(cell.style.width) || parseFloat(cell.getAttribute("width") || "") || 0;
+        const cellW =
+          parseWidthPx(cell.style.width, tableTargetWidth) ||
+          parseWidthPx(cell.getAttribute("width") || "", tableTargetWidth);
         cell.removeAttribute("width");
         cell.style.removeProperty("width");
         if (totalW > 0 && cellW > 0) {
