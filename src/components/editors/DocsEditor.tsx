@@ -48,7 +48,14 @@ const STORAGE_KEY = "docs-default";
 
 // ─── Word paste utilities (module-level so PasteDialog can call them) ─────────
 
-const WORD_HTML_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=/i;
+// Matches Word's clipboard markup (mso-*, xmlns:w=, ProgId=Word, ...) AND
+// Google Docs' (every Google Docs copy wraps its whole payload in
+// `<b id="docs-internal-guid-...">`, regardless of doc content). Both need
+// the same pt-unit and heading-semantics cleanup below before Univer's
+// paste handler can lay them out correctly — renamed from the Word-only
+// name this started as, since neither the detection nor most of the clean-
+// up in cleanWordHtml is actually Word-specific.
+const RICH_PASTE_SOURCE_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=|id="docs-internal-guid-/i;
 
 function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   // Phase 1: Extract class-based styles from <style> block
@@ -67,6 +74,23 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   let working = html;
   try {
     const p0 = new DOMParser().parseFromString(html, "text/html");
+
+    // ⓪ Google Docs wraps its ENTIRE clipboard payload in
+    // `<b style="font-weight:normal;" id="docs-internal-guid-...">` — a
+    // pure internal marker, not real formatting intent (every Google Docs
+    // copy has one, regardless of content). Confirmed by pasting a real
+    // Google Doc: every single span underneath — including ones with their
+    // own explicit `font-weight:400` — rendered bold, because Univer's
+    // paste handler reads the ancestor <b> TAG semantically and never
+    // finds a later signal that clears it (each span's own font-weight
+    // does correctly control ITS OWN bold state once this wrapper is
+    // gone). Unwrapping this one marker element fixes the whole
+    // document's bold state at once instead of touching every span.
+    p0.querySelectorAll('b[id^="docs-internal-guid-"]').forEach((b) => {
+      const frag = p0.createDocumentFragment();
+      while (b.firstChild) frag.appendChild(b.firstChild);
+      b.replaceWith(frag);
+    });
 
     // ① MsoHeading → <h1>–<h5>
     p0.querySelectorAll("p").forEach((p) => {
@@ -144,10 +168,29 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
     // ③ <br> inside paragraphs → paragraph splits
     // When a <br> is inside a <span>, siblings after it must be re-wrapped in
     // a clone of that span so formatting (font, bold, color) is preserved.
+    // A <br> with nothing but more <br>s/whitespace after it inside the
+    // paragraph is a pure TRAILING break, not a real line to split off —
+    // Google Docs appends `<br><br>` to the last item of a list to
+    // represent blank space after it (confirmed in a real Google Doc's
+    // clipboard HTML). Splitting on those created a new EMPTY paragraph
+    // per trailing <br>, which — since this all happens inside a <li> —
+    // Univer's list layout rendered as its own spurious empty bullet, one
+    // per list in the whole document; across a long document with many
+    // lists, that pollution alone was enough to multiply the page count
+    // several times over. Dropping trailing <br>s instead of splitting on
+    // them avoids creating that empty content at all.
     p0.querySelectorAll("p").forEach((p) => {
       const brs = [...p.querySelectorAll("br")];
       if (brs.length === 0) return;
       brs.forEach((br) => {
+        const tailRange = p0.createRange();
+        tailRange.setStartAfter(br);
+        if (p.lastChild) tailRange.setEndAfter(p.lastChild);
+        const hasRealContentAfter = (tailRange.cloneContents().textContent ?? "").trim() !== "";
+        if (!hasRealContentAfter) {
+          br.remove();
+          return;
+        }
         const newP = p0.createElement("p");
         const cls = p.getAttribute("class"); const sty = p.getAttribute("style");
         if (cls) newP.setAttribute("class", cls);
@@ -158,13 +201,13 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         if (parentSpan) {
           // Move nodes after the br that are inside the span into a new span clone
           const spanClone = parentSpan.cloneNode(false) as HTMLElement;
-          let next = br.nextSibling;
+          let next: ChildNode | null = br.nextSibling;
           while (next) { const tmp = next.nextSibling; spanClone.appendChild(next); next = tmp; }
           br.remove();
           parentSpan.insertAdjacentElement("afterend", spanClone);
           // Now move the span clone and everything after it into newP
           let after: ChildNode | null = spanClone;
-          while (after) { const tmp = after.nextSibling; newP.appendChild(after); after = tmp; }
+          while (after) { const tmp: ChildNode | null = after.nextSibling; newP.appendChild(after); after = tmp; }
         } else {
           let next = br.nextSibling;
           while (next) { const tmp = next.nextSibling; newP.appendChild(next); next = tmp; }
@@ -172,6 +215,19 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         }
         p.insertAdjacentElement("afterend", newP);
       });
+    });
+
+    // ③.5 <hr> → a bordered empty paragraph. Univer's document model has
+    // no native horizontal-rule block, so a bare <hr> (Google Docs emits
+    // one for a manually-inserted divider line) is silently dropped by its
+    // paste converter — confirmed missing from a real paste despite being
+    // present in the source clipboard HTML.
+    p0.querySelectorAll("hr").forEach((hr) => {
+      const p = p0.createElement("p");
+      p.className = "UniverNormal";
+      p.style.cssText = "border-bottom: 1px solid #c0c0c0; margin: 6pt 0; height: 0;";
+      p.innerHTML = "&nbsp;";
+      hr.replaceWith(p);
     });
 
     // ④ CSS vertical-align super/sub → <sup>/<sub>
@@ -351,19 +407,44 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       const totalW = parseFloat((table as HTMLElement).style.width) || parseFloat(table.getAttribute("width") || "") || 0;
       table.removeAttribute("width");
       (table as HTMLElement).style.removeProperty("width");
-      (table as HTMLElement).style.setProperty("width", "100%");
+      // A table's own declared width was being discarded outright in favor
+      // of always stretching to the full page (100%) — correct for a table
+      // that spans the page, wrong for one deliberately narrower (a
+      // callout/box built from a single shaded cell, say): it pasted at
+      // full page width when the source had it noticeably narrower.
+      // PAGE_CONTENT_WIDTH is the same 660px reference the cell-width
+      // scaling below already assumes a full-width table occupies — a
+      // narrower source table now targets a proportionally narrower width
+      // instead, and cells scale against that same target so the two never
+      // disagree with each other the way they would if only one honored
+      // the source width.
+      const PAGE_CONTENT_WIDTH = 660;
+      const tableTargetWidth = totalW > 0 ? Math.min(totalW, PAGE_CONTENT_WIDTH) : PAGE_CONTENT_WIDTH;
+      (table as HTMLElement).style.setProperty("width", `${tableTargetWidth}px`);
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
-      const isBorderless = table.getAttribute("border") === "0";
+      // Word marks a borderless table with the legacy border="0" attribute;
+      // Google Docs (used for layout — a letterhead's logo/title/logo row,
+      // for instance) instead sets CSS `border: none` on the table and/or
+      // each cell. Only checking the old attribute left every Google-Docs
+      // layout table showing full black gridlines it never had (confirmed:
+      // a 3-column logo/title/logo header pasted with visible borders
+      // around each cell despite explicit `border: none` in the source).
+      const hasNoBorder = (el: HTMLElement) => /\bnone\b/i.test(el.style.border || el.style.borderStyle || "");
       // Word marks merged-cell "phantom" placeholders with display:none — remove them
-      // so Univer doesn't render empty phantom cells as visible blank columns.
+      // first, so a phantom cell never counts toward the "every cell says
+      // border:none" check below, nor gets processed by the loop after it.
       table.querySelectorAll<HTMLElement>("td[style*='display:none'], td[style*='display: none']").forEach((td) => td.remove());
       const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
+      const isBorderless =
+        table.getAttribute("border") === "0" ||
+        hasNoBorder(table) ||
+        (cells.length > 0 && cells.every(hasNoBorder));
       cells.forEach((cell) => {
         const cellW = parseFloat(cell.style.width) || parseFloat(cell.getAttribute("width") || "") || 0;
         cell.removeAttribute("width");
         cell.style.removeProperty("width");
         if (totalW > 0 && cellW > 0) {
-          const scaledPx = Math.round((cellW / totalW) * 660);
+          const scaledPx = Math.round((cellW / totalW) * tableTargetWidth);
           cell.style.setProperty("width", `${scaledPx}px`);
           cell.setAttribute("width", String(scaledPx));
         }
@@ -590,6 +671,39 @@ export default function DocsEditor({
     // Word types "/" as a character; Univer's block menu steals the key.
     disableSlashMenu();
 
+    // Univer's own popup-positioning pipeline (@univerjs/ui, shared by
+    // every dropdown/context-menu/floating-toolbar it renders — the ribbon
+    // dropdowns, the paragraph "quick action" popup, table context menus,
+    // all of it) destructures `{ bottom, left, right, top }` from an
+    // `anchorRect` it expects its anchor observable to always emit. Hit
+    // once in real use ("Cannot destructure property 'bottom' of
+    // 'anchorRect' as it is undefined") but never reproduced despite
+    // extensive attempts — synthetic paste, real Cmd+V paste, ribbon
+    // dropdowns, scrolling, clicking through pasted content — so the exact
+    // anchor-element-disappears-mid-positioning race is still unknown, and
+    // it's deep inside vendored Univer code we don't control or want to
+    // patch directly. Since this is a popup failing to position (not a
+    // document-data error), losing that one popup and continuing is far
+    // better than Next's dev overlay taking over the whole page; anything
+    // else still surfaces normally.
+    //
+    // Also covers the "EmptyError" dispose race documented at this
+    // component's cleanup below (univer.dispose() completing an RxJS
+    // Subject with no elements left in its sequence). That race is real
+    // and was already guarded there, but with the wrong tool: a real
+    // unmount-with-a-table-present test showed it landing as an uncaught
+    // *window `error` event*, not the `unhandledrejection` the cleanup's
+    // own guard listens for. RxJS's internal errorContext() wrapper
+    // deliberately defers a Subject subscriber's synchronous error to a
+    // fresh task specifically so ordinary try/catch around .complete()
+    // can't see it, then dispatches it as a raw global error — which is
+    // exactly what this listener, unlike that one, actually catches.
+    const suppressKnownBenignUniverErrors = (event: ErrorEvent) => {
+      if (event.error instanceof TypeError && /anchorRect/.test(event.message)) event.preventDefault();
+      if (event.error?.name === "EmptyError") event.preventDefault();
+    };
+    window.addEventListener("error", suppressKnownBenignUniverErrors);
+
     const { univer, univerAPI } = createUniver({
       theme: WORD_THEME,
       locale: LocaleType.EN_US,
@@ -696,6 +810,21 @@ export default function DocsEditor({
     // The ruler needs the page's on-screen position, which is the document
     // component's own offset inside the scene, shifted by the horizontal
     // scroll and multiplied by the zoom.
+    //
+    // This originally always used `documents.top` as-is (page 1's own
+    // origin), so both rulers only ever showed page 1's geometry — as
+    // soon as a real multi-page document was scrolled past roughly one
+    // page's height, `pageTop` (page 1's now-scrolled-off-screen position)
+    // put every tick off the top of the viewport, and the vertical ruler
+    // went blank instead of following the page actually in view.
+    // Univer stacks pages vertically at `pageIndex * (pageHeight +
+    // pageGap)` from that same origin (confirmed by reading
+    // DocumentSkeletonManagerService's own layout math and its
+    // `pageMarginTop` config, which defaults to 14 document px when
+    // unset, as it is here) — recomputing pageTop for whichever page the
+    // current scroll position falls into keeps the ruler correct on every
+    // page, not just the first.
+    const PAGE_GAP = 14;
     rulerGeometryRef.current = () => {
       const container = containerRef.current;
       const renderUnit = renderManagerService.getRenderUnitById(fDoc.getId());
@@ -716,11 +845,15 @@ export default function DocsEditor({
       const canvasRect = canvas.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
       const scrollY = scene.getViewport("viewMain")?.viewportScrollY ?? 0;
+      const pageHeightDoc = style.pageSize.height ?? 1123;
+      const pageStride = pageHeightDoc + PAGE_GAP;
+      const pageIndex = Math.max(0, Math.floor((scrollY - documents.top) / pageStride));
+      const currentPageTop = documents.top + pageIndex * pageStride;
       return {
         pageLeft: canvasOffset + (documents.left - scrollX) * scale,
-        pageTop: canvasRect.top - containerRect.top + (documents.top - scrollY) * scale,
+        pageTop: canvasRect.top - containerRect.top + (currentPageTop - scrollY) * scale,
         pageWidth: style.pageSize.width * scale,
-        pageHeight: (style.pageSize.height ?? 1123) * scale,
+        pageHeight: pageHeightDoc * scale,
         marginLeft: style.marginLeft ?? 72,
         marginRight: style.marginRight ?? 72,
         marginTop: style.marginTop ?? 72,
@@ -750,13 +883,13 @@ export default function DocsEditor({
       }
       const data = originalGetData.call(this, type) as string;
       // Fallback: clean silently if Word HTML bypasses the capture listener
-      if (type === "text/html" && WORD_HTML_RE.test(data)) return cleanWordHtml(data);
+      if (type === "text/html" && RICH_PASTE_SOURCE_RE.test(data)) return cleanWordHtml(data);
       return data;
     };
 
     const handleWordPasteCapture = (e: ClipboardEvent) => {
       const html = originalGetData.call(e.clipboardData, "text/html") as string;
-      if (!html || !WORD_HTML_RE.test(html)) return;
+      if (!html || !RICH_PASTE_SOURCE_RE.test(html)) return;
       e.preventDefault();
       e.stopPropagation();
       const plain = originalGetData.call(e.clipboardData, "text/plain") as string;
@@ -773,7 +906,7 @@ export default function DocsEditor({
         if (item.types.includes("text/html")) {
           const blob = await item.getType("text/html");
           const html = await blob.text();
-          if (WORD_HTML_RE.test(html)) {
+          if (RICH_PASTE_SOURCE_RE.test(html)) {
             const parts: Record<string, Blob | Promise<Blob>> = {
               "text/html": new Blob([cleanWordHtml(html)], { type: "text/html" }),
             };
@@ -891,6 +1024,22 @@ export default function DocsEditor({
     void refreshStatus();
 
     return () => {
+      // Registered first and removed last (see below), covering every
+      // dispose() call in this cleanup, not just univer.dispose()'s own.
+      // Originally this was set up immediately around univer.dispose()
+      // only, on the assumption that was the sole source of the race —
+      // true until a table's resize interaction was also live: its own
+      // teardown (tableResize.dispose(), a few lines down) does enough
+      // additional async unsubscribing that the EmptyError rejection from
+      // univer.dispose() further below could still land after a same-tick
+      // removal window, confirmed by a real unmount-with-a-table-present
+      // test leaking it as an uncaught rejection despite the guard already
+      // being in place.
+      const swallowEmptyError = (event: PromiseRejectionEvent) => {
+        if (event.reason?.name === "EmptyError") event.preventDefault();
+      };
+      window.addEventListener("unhandledrejection", swallowEmptyError);
+
       subscription.unsubscribe();
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
@@ -920,11 +1069,9 @@ export default function DocsEditor({
       // stack traces as if thrown right here. Harmless: the instance is
       // being torn down either way. Swallow only this specific error so a
       // fast unmount doesn't crash the dev overlay / bubble as an uncaught
-      // rejection, while any other dispose failure still surfaces.
-      const swallowEmptyError = (event: PromiseRejectionEvent) => {
-        if (event.reason?.name === "EmptyError") event.preventDefault();
-      };
-      window.addEventListener("unhandledrejection", swallowEmptyError);
+      // rejection, while any other dispose failure still surfaces. (Guard
+      // itself is registered at the top of this cleanup function now — see
+      // there for why.)
 
       // Same race, different symptom: dispose() can synchronously unmount
       // an internal React root Univer owns (its own toolbar/canvas overlay)
@@ -944,7 +1091,15 @@ export default function DocsEditor({
         if ((err as Error)?.name !== "EmptyError") throw err;
       } finally {
         console.error = originalConsoleError;
-        setTimeout(() => window.removeEventListener("unhandledrejection", swallowEmptyError), 0);
+        // A same-tick (0ms) removal was too tight once a table's resize
+        // interaction added its own teardown work ahead of this — the
+        // EmptyError rejection can land on a later tick than that. 300ms
+        // comfortably covers it without leaving the guard live long enough
+        // to risk swallowing an unrelated later EmptyError.
+        setTimeout(() => {
+          window.removeEventListener("unhandledrejection", swallowEmptyError);
+          window.removeEventListener("error", suppressKnownBenignUniverErrors);
+        }, 300);
       }
 
       disposedRef.current = false;

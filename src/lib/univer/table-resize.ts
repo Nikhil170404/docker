@@ -65,7 +65,14 @@ interface SceneLike {
   getViewport: (key: string) => { viewportScrollX: number; viewportScrollY: number } | null | undefined;
   setCursor: (cursor: CURSOR_TYPE) => void;
   resetCursor: () => void;
-  onPointerMove$: { subscribeEvent: (callback: (event: PointerEvent) => void) => IDisposable | undefined };
+  // subscribeEvent() returns an RxJS Subscription (.unsubscribe()), not a
+  // Univer IDisposable (.dispose()) — confirmed by reading EventSubject's
+  // own implementation, which returns the result of a plain
+  // `super.subscribe(...)`. Mistyping this as IDisposable crashed on
+  // teardown with "pointerMove?.dispose is not a function": the value was
+  // never null/undefined (so `?.` didn't help), it just had a different
+  // method name than this type claimed.
+  onPointerMove$: { subscribeEvent: (callback: (event: PointerEvent) => void) => { unsubscribe: () => void } | undefined };
 }
 
 /** Univer's canvas coordinates: scaled by zoom and offset by the scroll. */
@@ -302,7 +309,7 @@ function attachTableResize(
 
   return toDisposable(() => {
     hoverSubscription.unsubscribe();
-    pointerMove?.dispose();
+    pointerMove?.unsubscribe();
     container?.removeEventListener("pointerdown", onPointerDown, true);
     clearCursor();
   });

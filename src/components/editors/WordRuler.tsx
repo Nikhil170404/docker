@@ -15,7 +15,7 @@ const SNAP_PX = PX_PER_INCH / 8;
 export interface RulerGeometry {
   /** Left edge of the page in container pixels. */
   pageLeft: number;
-  /** Top edge of the first page in container pixels. */
+  /** Top edge of the page currently in view in container pixels. */
   pageTop: number;
   /** On-screen page width (already zoomed). */
   pageWidth: number;
