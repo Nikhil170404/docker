@@ -528,7 +528,33 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
     // Headings: preserve heading semantics via data-heading attribute so
     // Univer's getHeadingNamedStyleType fires, while also adding UniverNormal
     // for paragraph style resolution (text-align, line-height, spacing).
+    //
+    // Univer's own paste parser recognizes a literal <h1>-<h5> TAG on its
+    // own (getHeadingNamedStyleType switches on node.tagName directly) and
+    // applies its own much larger default size for that heading level
+    // whenever the heading's own content doesn't specify a font-size —
+    // confirmed by pasting a real-shaped <h1> with no inline font-size on
+    // its span: it rendered noticeably larger than a real document's
+    // actual (often comparatively modest, e.g. a legal document's section
+    // heading) intended size, wrapping and even hyphenating where the
+    // source fit on one line. A heading WITH its own explicit font-size
+    // keeps that size regardless of tag, so only the sizeless case is a
+    // problem. Since there's no way to know what size was actually
+    // intended here, the safe choice is not to guess a number of our own
+    // either — demoting the tag to a plain paragraph (keeping whatever
+    // inline styling, typically just bold, the source did specify) means
+    // it inherits the document's normal text size instead of either
+    // Univer's oversized default or an invented one.
     tmpDoc.querySelectorAll("h1, h2, h3, h4, h5").forEach((h) => {
+      const hasExplicitSize = !!h.querySelector<HTMLElement>('[style*="font-size"]') || /font-size/.test((h as HTMLElement).style.cssText);
+      if (!hasExplicitSize) {
+        const p = tmpDoc.createElement("p");
+        [...h.attributes].forEach((a) => p.setAttribute(a.name, a.value));
+        p.innerHTML = h.innerHTML;
+        h.replaceWith(p);
+        p.className = (p.className + " UniverNormal").trim();
+        return;
+      }
       const level = h.tagName.toLowerCase();
       (h as HTMLElement).setAttribute("data-heading", level);
       (h as HTMLElement).className = ((h as HTMLElement).className + " UniverNormal").trim();
