@@ -61,13 +61,40 @@ const RICH_PASTE_SOURCE_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.
 function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   // Phase 1: Extract class-based styles from <style> block
   const classStyles = new Map<string, string>();
+  // A heading (or any element) can also be styled by a bare TAG selector
+  // in the <style> block (`h1 { font-size: 16pt; font-weight: bold; ...
+  // }`, no class involved) — a legitimate, if less common, way real
+  // documents define "Heading 1" alongside the more usual class-based
+  // one. Only the class form was ever extracted here, so a tag-selector-
+  // styled heading carried no style information into the DOM at all: it
+  // rendered completely plain (no bold, no color, no size), not even
+  // falling into the "no explicit size, demote to a plain paragraph"
+  // path deliberately, since that path still preserves whatever the
+  // element itself specifies — there was simply nothing to preserve.
+  // Confirmed by pasting a real-shaped `h1 { ... }` rule with no class.
+  const tagStyles = new Map<string, string>();
   const styleBlockMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
   if (styleBlockMatch) {
-    const ruleRx = /\.(\w+)[^{]*\{([^}]+)\}/g;
+    const ruleRx = /([^{}]+)\{([^}]+)\}/g;
     let m: RegExpExecArray | null;
     while ((m = ruleRx.exec(styleBlockMatch[1])) !== null) {
       const props = m[2].split(";").map((p) => p.trim()).filter((p) => p && !/^mso-/i.test(p)).join("; ");
-      if (props) classStyles.set(m[1], props);
+      if (!props) continue;
+      for (const selector of m[1].split(",")) {
+        const trimmed = selector.trim();
+        if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(trimmed)) {
+          // A bare tag selector (`h1`), nothing else in the token at all.
+          tagStyles.set(trimmed.toLowerCase(), props);
+          continue;
+        }
+        // A class reference anywhere in the token — bare (`.MsoNormal`) or
+        // compound (`p.MsoNormal`, tag+class together, the far more common
+        // real-document form: `p.MsoNormal, li.MsoNormal, div.MsoNormal`).
+        // Not anchored to the token's start on purpose, matching this
+        // extraction's original (looser, but correct for that form) intent.
+        const classMatch = /\.(\w+)/.exec(trimmed);
+        if (classMatch) classStyles.set(classMatch[1], props);
+      }
     }
   }
 
@@ -342,6 +369,17 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
           const existing = (el as HTMLElement).style.cssText;
           (el as HTMLElement).style.cssText = fromClass + (existing ? "; " + existing : "");
         }
+      });
+    }
+
+    // Bake bare-tag-selector styles into inline styles too (h1 { ... },
+    // with no class involved — see the extraction comment above).
+    if (tagStyles.size > 0) {
+      tagStyles.forEach((props, tag) => {
+        tmpDoc.querySelectorAll(tag).forEach((el) => {
+          const existing = (el as HTMLElement).style.cssText;
+          (el as HTMLElement).style.cssText = props + (existing ? "; " + existing : "");
+        });
       });
     }
 
