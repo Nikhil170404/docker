@@ -20,6 +20,7 @@ import {
   ALL_TABLE_STYLE_COMMANDS,
   clearRememberedTableRange,
   resolveLiveTableRange,
+  SetTableAlignmentCommandId,
 } from "@/lib/univer/table-style-commands";
 import { SetBorderPenCommand } from "@/lib/univer/border-pen";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
@@ -442,6 +443,20 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       const tableTargetWidth = totalW > 0 ? Math.min(totalW, PAGE_CONTENT_WIDTH) : PAGE_CONTENT_WIDTH;
       (table as HTMLElement).style.setProperty("width", `${tableTargetWidth}px`);
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
+      // A table centered via CSS margin:auto (or the legacy align="center"
+      // attribute) — common for a narrower callout box — has no CSS-level
+      // effect once Univer parses it into its own document model, since
+      // table alignment there is a model property (ITable.align), not
+      // something a stray margin on the pasted element could ever satisfy.
+      // Tag it with a data attribute the paste-completion step below can
+      // find, in source order, to apply the real alignment command after
+      // the table actually exists in the document.
+      const marginLeft = (table as HTMLElement).style.marginLeft;
+      const marginRight = (table as HTMLElement).style.marginRight;
+      const isCentered =
+        table.getAttribute("align") === "center" ||
+        (marginLeft === "auto" && marginRight === "auto");
+      if (isCentered) (table as HTMLElement).setAttribute("data-align", "center");
       // Word marks a borderless table with the legacy border="0" attribute;
       // Google Docs (used for layout — a letterhead's logo/title/logo row,
       // for instance) instead sets CSS `border: none` on the table and/or
@@ -516,6 +531,21 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   return clean;
 }
 
+// Reads the data-align="center" markers cleanWordHtml leaves on tables, in
+// source document order — the same order the tables that land in the
+// document (newly-created table IDs, diffed before/after the paste) come
+// out in, letting the paste-completion step zip the two together.
+function extractTableAlignFlags(html: string): ("start" | "center")[] {
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return [...doc.querySelectorAll("table")].map((table) =>
+      table.getAttribute("data-align") === "center" ? "center" : "start",
+    );
+  } catch {
+    return [];
+  }
+}
+
 // ─── Paste-from-Word dialog ────────────────────────────────────────────────────
 
 function PasteDialog({
@@ -524,6 +554,7 @@ function PasteDialog({
   editorEl,
   pendingHtmlRef,
   pendingPlainRef,
+  pendingTableAlignRef,
   onClose,
 }: {
   rawHtml: string;
@@ -531,6 +562,7 @@ function PasteDialog({
   editorEl: Element | null;
   pendingHtmlRef: React.RefObject<string | null>;
   pendingPlainRef: React.RefObject<string | null>;
+  pendingTableAlignRef: React.RefObject<("start" | "center")[] | null>;
   onClose: () => void;
 }) {
   const insert = (mode: "keep" | "clean" | "text") => {
@@ -542,8 +574,10 @@ function PasteDialog({
           .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
           .split("\n").filter(Boolean).join("</p><p class=\"UniverNormal\">") +
         "</p>";
+      pendingTableAlignRef.current = null;
     } else {
       html = cleanWordHtml(rawHtml, mode);
+      pendingTableAlignRef.current = extractTableAlignFlags(html);
     }
     pendingHtmlRef.current = html;
     pendingPlainRef.current = plainText;
@@ -674,6 +708,7 @@ export default function DocsEditor({
   const [ready, setReady] = useState(false);
   const pendingHtmlRef = useRef<string | null>(null);
   const pendingPlainRef = useRef<string | null>(null);
+  const pendingTableAlignRef = useRef<("start" | "center")[] | null>(null);
   const [pasteDialog, setPasteDialog] = useState<{
     rawHtml: string;
     plainText: string;
@@ -720,9 +755,23 @@ export default function DocsEditor({
     // fresh task specifically so ordinary try/catch around .complete()
     // can't see it, then dispatches it as a raw global error — which is
     // exactly what this listener, unlike that one, actually catches.
+    // "Table is not found." — thrown by Univer's own spanEntireRow/
+    // spanEntireColumn getters (docs-ui) when a selection's own tableId no
+    // longer resolves in tableSource, e.g. a rectRange left over from a
+    // prior selection state after the table it pointed at was replaced or
+    // removed. Reported crashing Select All / Backspace in real use; not
+    // reproduced despite many attempts (typing then Cmd+A inside a cell,
+    // Cmd+A immediately after table creation, pasting multiple tables then
+    // Cmd+A+Backspace) with or without a deep window-level listener to
+    // catch a deferred throw. Same class as the two errors above — a
+    // stale-selection read, not a document-data corruption — so the same
+    // mitigation applies: suppress the crash so the editor keeps working
+    // instead of Next's overlay taking over, even without the exact
+    // trigger pinned down.
     const suppressKnownBenignUniverErrors = (event: ErrorEvent) => {
       if (event.error instanceof TypeError && /anchorRect/.test(event.message)) event.preventDefault();
       if (event.error?.name === "EmptyError") event.preventDefault();
+      if (event.error instanceof Error && event.error.message === "Table is not found.") event.preventDefault();
     };
     window.addEventListener("error", suppressKnownBenignUniverErrors);
 
@@ -919,6 +968,35 @@ export default function DocsEditor({
     };
     document.addEventListener("paste", handleWordPasteCapture, true);
 
+    // Applies table centering after a paste actually lands, since Univer's
+    // paste-import has no HTML-CSS-to-document mapping for it at all
+    // (confirmed by reading every use of TableAlignmentType in docs-ui —
+    // the only one is Insert Table's own default) — a pasted centered
+    // table would otherwise sit flush against the left margin regardless.
+    // Registered as a capture-phase listener alongside handleWordPasteCapture
+    // above so it also sees PasteDialog's synthetic re-dispatch and can
+    // snapshot the table IDs already in the document BEFORE Univer's own
+    // (later-phase) paste handling inserts the new ones; diffing against
+    // that snapshot after a short delay identifies exactly which tables
+    // just arrived, in the same order cleanWordHtml recorded their
+    // centering in.
+    const handleTableAlignAfterPaste = () => {
+      const flags = pendingTableAlignRef.current;
+      if (!flags || flags.length === 0) return;
+      const beforeIds = new Set(fDoc.getDocumentDataModel()?.getBody()?.tables?.map((t) => t.tableId) ?? []);
+      setTimeout(() => {
+        const afterTables = fDoc.getDocumentDataModel()?.getBody()?.tables ?? [];
+        const newTables = afterTables.filter((t) => !beforeIds.has(t.tableId));
+        newTables.forEach((t, i) => {
+          if (flags[i] === "center") {
+            void commandService.executeCommand(SetTableAlignmentCommandId, { tableId: t.tableId, align: "center" });
+          }
+        });
+        pendingTableAlignRef.current = null;
+      }, 300);
+    };
+    document.addEventListener("paste", handleTableAlignAfterPaste, true);
+
     // Secondary interception: programmatic clipboard reads
     const originalClipboardRead = navigator.clipboard.read.bind(navigator.clipboard);
     navigator.clipboard.read = async (...args) => {
@@ -1072,6 +1150,7 @@ export default function DocsEditor({
       DataTransfer.prototype.getData = originalGetData;
       navigator.clipboard.read = originalClipboardRead;
       document.removeEventListener("paste", handleWordPasteCapture, true);
+      document.removeEventListener("paste", handleTableAlignAfterPaste, true);
       pageChrome.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
@@ -1163,6 +1242,7 @@ export default function DocsEditor({
           editorEl={pasteDialog.editorEl}
           pendingHtmlRef={pendingHtmlRef}
           pendingPlainRef={pendingPlainRef}
+          pendingTableAlignRef={pendingTableAlignRef}
           onClose={() => setPasteDialog(null)}
         />
       )}

@@ -17,6 +17,7 @@ import {
   IUniverInstanceService,
   JSONX,
   TableRowHeightRule,
+  TableAlignmentType,
   TableLayoutType,
   TableSizeType,
   TextX,
@@ -729,6 +730,60 @@ export const SetTableLayoutCommand: ICommand<ISetTableLayoutParams> = {
 };
 
 // ---------------------------------------------------------------------------
+// Table alignment (page-relative: left / center / right)
+// ---------------------------------------------------------------------------
+
+// Word/Google Docs both let a table be centered (or right-aligned) on the
+// page independent of its own width — a narrower "callout" table centered
+// via CSS margin:auto, say. The document format already models this
+// (ITable.align, the same TableAlignmentType Univer's own Insert Table
+// command sets to START by default), but nothing in the open-source paste
+// pipeline ever reads the pasted CSS and sets it — confirmed by reading
+// every use of TableAlignmentType in docs-ui: the single hit is that
+// default. A pasted centered table lands flush against the left margin
+// instead. This command is the direct, by-tableId way to apply it — no
+// live selection or range needed, since alignment is a whole-table
+// property — used by the paste pipeline once it has matched a source
+// table to the one that just landed in the document.
+export interface ISetTableAlignmentParams {
+  tableId: string;
+  align: "start" | "center" | "end";
+}
+
+export const SetTableAlignmentCommandId = "dockaro.command.table-alignment";
+
+export const SetTableAlignmentCommand: ICommand<ISetTableAlignmentParams> = {
+  id: SetTableAlignmentCommandId,
+  type: CommandType.COMMAND,
+  handler: (accessor, params) => {
+    if (!params) return false;
+    const found = getDocAndTable(accessor, params.tableId);
+    if (!found) return false;
+    const { docDataModel, table } = found;
+
+    const jsonX = JSONX.getInstance();
+    const rawActions: JSONXActions[] = [];
+
+    const newVal =
+      params.align === "center"
+        ? TableAlignmentType.CENTER
+        : params.align === "end"
+          ? TableAlignmentType.END
+          : TableAlignmentType.START;
+
+    setProperty(
+      jsonX,
+      rawActions,
+      ["tableSource", params.tableId, "align"],
+      table.align,
+      newVal,
+    );
+
+    return runMutation(accessor, docDataModel, rawActions);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Banded (striped) rows — whole table, two alternating colors
 // ---------------------------------------------------------------------------
 
@@ -1205,6 +1260,7 @@ export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
   SetTableRowHeightCommand,
   SetTableColumnWidthCommand,
   SetTableLayoutCommand,
+  SetTableAlignmentCommand,
   SetTableFitToWindowCommand,
   SetTableBandedRowsCommand,
   SetTableHeaderRowCommand,
