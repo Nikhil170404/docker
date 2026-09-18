@@ -424,7 +424,29 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
       // override our scaled cell widths computed below.
       table.querySelectorAll("colgroup, col").forEach((el) => el.remove());
+      // A table's own declared width and the sum of its cells' own declared
+      // widths can disagree — plausible in any document old/edited enough
+      // to have had columns and the table itself resized independently at
+      // different times (confirmed: a table whose cells summed to 820px
+      // while the table itself said 630px rendered the cells at their full
+      // undiminished size regardless, since scaling by a totalW smaller
+      // than what the cells actually sum to is a no-op — table overflowed
+      // the page). The cells' own sum is what actually determines each
+      // column's proportion, so it's the one used as the scaling
+      // reference whenever it's available, falling back to the table's
+      // own width only when no cell declares one at all.
+      const rowCellSums = [...table.querySelectorAll("tr")].map((row) =>
+        [...row.querySelectorAll("td, th")].reduce(
+          (sum, cell) =>
+            sum +
+            (parseWidthPx((cell as HTMLElement).style.width, PAGE_CONTENT_WIDTH) ||
+              parseWidthPx(cell.getAttribute("width") || "", PAGE_CONTENT_WIDTH)),
+          0,
+        ),
+      );
+      const bestRowCellSum = Math.max(0, ...rowCellSums);
       const totalW =
+        bestRowCellSum ||
         parseWidthPx((table as HTMLElement).style.width, PAGE_CONTENT_WIDTH) ||
         parseWidthPx(table.getAttribute("width") || "", PAGE_CONTENT_WIDTH);
       table.removeAttribute("width");
