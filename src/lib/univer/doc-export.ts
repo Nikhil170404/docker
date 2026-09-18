@@ -266,15 +266,23 @@ ${body}
   iframe.style.border = "0";
   document.body.appendChild(iframe);
 
+  // Both onafterprint and the fallback timer below call this — reliably
+  // in some browsers, both fire for the same print. removeChild on an
+  // already-removed node throws ("The node to be removed is not a child
+  // of this node"), confirmed crashing on a real export. Checking the
+  // iframe is still actually attached makes a second cleanup call a
+  // harmless no-op instead.
   const cleanup = () => {
     // Give the print dialog a moment to actually open before the iframe
     // (and the document it holds) gets torn down from under it.
-    setTimeout(() => document.body.removeChild(iframe), 1000);
+    setTimeout(() => {
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    }, 1000);
   };
 
   const frameWindow = iframe.contentWindow;
   if (!frameWindow) {
-    document.body.removeChild(iframe);
+    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
     return;
   }
   frameWindow.document.open();
