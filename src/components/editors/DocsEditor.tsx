@@ -563,6 +563,29 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       });
     });
 
+    // Univer lays inline images out from their paragraph style rather than
+    // CSS auto-margins or a wrapper div's alignment. Promote clipboard
+    // alignment onto the nearest paragraph before importing so the logo and
+    // illustrations remain centred (or side-aligned) like the source.
+    tmpDoc.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      const wrapper = img.closest<HTMLElement>("[style*='text-align']");
+      const wrapperAlign = wrapper?.style.textAlign;
+      const leftAuto = img.style.marginLeft === "auto";
+      const rightAuto = img.style.marginRight === "auto";
+      const alignment = wrapperAlign === "center" || (leftAuto && rightAuto)
+        ? "center"
+        : wrapperAlign === "right" || leftAuto
+          ? "right"
+          : wrapperAlign === "left" || rightAuto
+            ? "left"
+            : null;
+      if (!alignment) return;
+      const paragraph = img.closest<HTMLElement>("p, h1, h2, h3, h4, h5, h6");
+      if (paragraph) paragraph.style.textAlign = alignment;
+      img.style.removeProperty("margin-left");
+      img.style.removeProperty("margin-right");
+    });
+
     // Headings: preserve heading semantics via data-heading attribute so
     // Univer's getHeadingNamedStyleType fires, while also adding UniverNormal
     // for paragraph style resolution (text-align, line-height, spacing).
