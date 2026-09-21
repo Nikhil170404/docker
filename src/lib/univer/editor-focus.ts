@@ -1,6 +1,11 @@
 import { ICommandService, toDisposable } from "@univerjs/core";
 import type { IDisposable, Injector } from "@univerjs/core";
-import { CreateDocTableCommand, DocSelectionRenderService } from "@univerjs/docs-ui";
+import {
+  CreateDocTableCommand,
+  DocSelectionRenderService,
+  SetInlineFormatFontFamilyCommand,
+  SetInlineFormatFontSizeCommand,
+} from "@univerjs/docs-ui";
 import { IRenderManagerService } from "@univerjs/engine-render";
 
 // Commands that are reached through one of Univer's modal dialogs. The
@@ -18,6 +23,12 @@ const AFTER_DIALOG_COMMANDS: readonly string[] = [
   // Univer's own paragraph and page dialogs, same shape.
   "doc-paragraph-setting.command",
   "docs.command.page-setup",
+  // Font selectors live in a ribbon popover. Without restoring the editor
+  // focus after their command runs, the first keystroke after choosing a
+  // font or size is swallowed by the popover instead of being entered in
+  // the document.
+  SetInlineFormatFontFamilyCommand.id,
+  SetInlineFormatFontSizeCommand.id,
 ];
 
 /**
