@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useImperativeHandle, useRef, useState } from "react";
+import { config as rxjsConfig } from "rxjs";
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
 import { UniverDocsCorePreset } from "@univerjs/preset-docs-core";
 import UniverPresetDocsCoreEnUS from "@univerjs/preset-docs-core/locales/en-US";
@@ -46,6 +47,28 @@ import { createWatermarkCommand } from "@/lib/univer/watermark";
 import { buildWordLocale, WORD_THEME } from "@/lib/univer/word-theme";
 
 const STORAGE_KEY = "docs-default";
+
+// Module-level, set once: RxJS's own reportUnhandledError() checks
+// config.onUnhandledError *before* deciding to `throw err` inside a
+// setTimeout() callback (see rxjs/dist/.../reportUnhandledError.js) — a
+// genuine new uncaught exception, not a promise rejection, and not a
+// synthetic event our own window "error"/"unhandledrejection" listeners
+// could reliably preempt: Next's dev-overlay registers its own global
+// error listener earlier (at app bootstrap, before this component ever
+// mounts) and reports/logs the raw error the moment it's thrown,
+// regardless of what a later-registered listener's preventDefault() does
+// afterward. Intercepting here, at the one place RxJS itself decides
+// whether to throw, is the only point that actually runs before any of
+// that — no event, no listener-order race, no timing to get wrong. Covers
+// exactly the "no elements in sequence" EmptyError from Univer's dispose()
+// racing its own async lifecycle init (see the dispose cleanup below);
+// everything else still throws through to normal uncaught-error reporting.
+const originalOnUnhandledError = rxjsConfig.onUnhandledError;
+rxjsConfig.onUnhandledError = (err) => {
+  if ((err as Error)?.name === "EmptyError") return;
+  if (originalOnUnhandledError) originalOnUnhandledError(err);
+  else throw err;
+};
 
 // ─── Word paste utilities (module-level so PasteDialog can call them) ─────────
 
@@ -113,7 +136,7 @@ function addGoogleDocsBookmarkMarkers(doc: Document, anchors: readonly string[])
 }
 
 
-function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocsPayload?: string | null): string {
+export function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocsPayload?: string | null): string {
   // Phase 1: Extract class-based styles from <style> block
   const classStyles = new Map<string, string>();
   // A heading (or any element) can also be styled by a bare TAG selector
@@ -536,12 +559,12 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
         const pct = parseFloat(trimmed);
         return Number.isFinite(pct) ? (pct / 100) * referencePx : 0;
       }
-      const value = parseFloat(trimmed);
-      if (!Number.isFinite(value)) return 0;
+      const numeric = parseFloat(trimmed);
+      if (!Number.isFinite(numeric)) return 0;
       // Google Docs serializes physical table widths in points. CSS pixels
       // are 96dpi (1pt = 4/3px), so treating 451pt as 451px made the
       // source's near-full-width callout noticeably too narrow.
-      return trimmed.endsWith("pt") ? value * (4 / 3) : value;
+      return trimmed.endsWith("pt") ? numeric * (4 / 3) : numeric;
     };
     tmpDoc.querySelectorAll("table").forEach((table) => {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
@@ -693,7 +716,10 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
     // Univer's oversized default or an invented one.
     tmpDoc.querySelectorAll("h1, h2, h3, h4, h5").forEach((h) => {
       const hasExplicitSize = !!h.querySelector<HTMLElement>('[style*="font-size"]') || /font-size/.test((h as HTMLElement).style.cssText);
-      // Univer ignores paragraph alignment on semantic heading tags. Google Docs\n      // may use a styled h1 merely for a subtitle, so preserve its visual\n      // alignment by importing it as a regular paragraph in that case.\n      if (!hasExplicitSize || !!(h as HTMLElement).style.textAlign) {
+      // Univer ignores paragraph alignment on semantic heading tags. Google Docs
+      // may use a styled h1 merely for a subtitle, so preserve its visual
+      // alignment by importing it as a regular paragraph in that case.
+      if (!hasExplicitSize || !!(h as HTMLElement).style.textAlign) {
         const p = tmpDoc.createElement("p");
         [...h.attributes].forEach((a) => p.setAttribute(a.name, a.value));
         p.innerHTML = h.innerHTML;
@@ -750,6 +776,7 @@ function PasteDialog({
   pendingPlainRef,
   pendingTableAlignRef,
   googleDocsPayload,
+  onRichPasteDetected,
   onClose,
 }: {
   rawHtml: string;
@@ -759,10 +786,19 @@ function PasteDialog({
   pendingPlainRef: React.RefObject<string | null>;
   pendingTableAlignRef: React.RefObject<("start" | "center")[] | null>;
   googleDocsPayload?: string | null;
+  /** "Keep Formatting" hands cleaned HTML here instead of converting it
+   * through Univer's document model — see DocsEditor's own prop doc for
+   * why. "Match Document Style" and "Text Only" are unaffected: those are
+   * exactly the cases where the lossy model is fine. */
+  onRichPasteDetected?: (html: string) => void;
   onClose: () => void;
 }) {
   const insert = (mode: "keep" | "clean" | "text") => {
     onClose();
+    if (mode === "keep" && onRichPasteDetected) {
+      onRichPasteDetected(cleanWordHtml(rawHtml, "keep", googleDocsPayload));
+      return;
+    }
     let html: string;
     if (mode === "text") {
       html = "<p class=\"UniverNormal\">" +
@@ -891,9 +927,15 @@ export type DocsEditorHandle = {
 export default function DocsEditor({
   apiRef,
   onStatusChange,
+  onRichPasteDetected,
 }: {
   apiRef?: React.RefObject<DocsEditorHandle | null>;
   onStatusChange?: (status: WordDocumentStatus) => void;
+  /** Fires when "Keep Formatting" is chosen for a Word/Google Docs paste,
+   * with the same cleaned HTML that would otherwise be converted into
+   * Univer's document model. The page-level parent uses this to switch
+   * the whole document into fidelity mode instead. */
+  onRichPasteDetected?: (html: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const disposedRef = useRef(false);
@@ -941,17 +983,12 @@ export default function DocsEditor({
     // better than Next's dev overlay taking over the whole page; anything
     // else still surfaces normally.
     //
-    // Also covers the "EmptyError" dispose race documented at this
-    // component's cleanup below (univer.dispose() completing an RxJS
-    // Subject with no elements left in its sequence). That race is real
-    // and was already guarded there, but with the wrong tool: a real
-    // unmount-with-a-table-present test showed it landing as an uncaught
-    // *window `error` event*, not the `unhandledrejection` the cleanup's
-    // own guard listens for. RxJS's internal errorContext() wrapper
-    // deliberately defers a Subject subscriber's synchronous error to a
-    // fresh task specifically so ordinary try/catch around .complete()
-    // can't see it, then dispatches it as a raw global error — which is
-    // exactly what this listener, unlike that one, actually catches.
+    // (The "EmptyError" dispose race this used to also cover here is now
+    // handled at its actual source — see the module-level
+    // rxjsConfig.onUnhandledError override above — since a window "error"
+    // listener registered from inside this component can never reliably
+    // preempt Next's own dev-overlay error listener, which is registered
+    // earlier, at app bootstrap.)
     // "Table is not found." — thrown by Univer's own spanEntireRow/
     // spanEntireColumn getters (docs-ui) when a selection's own tableId no
     // longer resolves in tableSource, e.g. a rectRange left over from a
@@ -967,7 +1004,6 @@ export default function DocsEditor({
     // trigger pinned down.
     const suppressKnownBenignUniverErrors = (event: ErrorEvent) => {
       if (event.error instanceof TypeError && /anchorRect/.test(event.message)) event.preventDefault();
-      if (event.error?.name === "EmptyError") event.preventDefault();
       if (event.error instanceof Error && event.error.message === "Table is not found.") event.preventDefault();
     };
     window.addEventListener("error", suppressKnownBenignUniverErrors);
@@ -1322,22 +1358,6 @@ export default function DocsEditor({
     void refreshStatus();
 
     return () => {
-      // Registered first and removed last (see below), covering every
-      // dispose() call in this cleanup, not just univer.dispose()'s own.
-      // Originally this was set up immediately around univer.dispose()
-      // only, on the assumption that was the sole source of the race —
-      // true until a table's resize interaction was also live: its own
-      // teardown (tableResize.dispose(), a few lines down) does enough
-      // additional async unsubscribing that the EmptyError rejection from
-      // univer.dispose() further below could still land after a same-tick
-      // removal window, confirmed by a real unmount-with-a-table-present
-      // test leaking it as an uncaught rejection despite the guard already
-      // being in place.
-      const swallowEmptyError = (event: PromiseRejectionEvent) => {
-        if (event.reason?.name === "EmptyError") event.preventDefault();
-      };
-      window.addEventListener("unhandledrejection", swallowEmptyError);
-
       subscription.unsubscribe();
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
@@ -1364,13 +1384,14 @@ export default function DocsEditor({
       // very quickly after mount) leaves an internal
       // firstValueFrom(lifecycle$...) with nothing left to emit once
       // disposal completes the source stream — RxJS rejects that with
-      // EmptyError ("no elements in sequence"), surfaced by V8's async
-      // stack traces as if thrown right here. Harmless: the instance is
-      // being torn down either way. Swallow only this specific error so a
-      // fast unmount doesn't crash the dev overlay / bubble as an uncaught
-      // rejection, while any other dispose failure still surfaces. (Guard
-      // itself is registered at the top of this cleanup function now — see
-      // there for why.)
+      // EmptyError ("no elements in sequence"). This mostly doesn't even
+      // reach the catch below: RxJS defers the actual throw into a fresh
+      // setTimeout() task via its own reportUnhandledError(), well after
+      // this try/catch's stack frame is gone, which is why the real guard
+      // for it is the module-level rxjsConfig.onUnhandledError override
+      // near the top of this file, not this try/catch. The catch stays as
+      // a harmless backstop for the rarer case where it does land
+      // synchronously.
 
       // Same race, different symptom: dispose() can synchronously unmount
       // an internal React root Univer owns (its own toolbar/canvas overlay)
@@ -1390,13 +1411,13 @@ export default function DocsEditor({
         if ((err as Error)?.name !== "EmptyError") throw err;
       } finally {
         console.error = originalConsoleError;
-        // A same-tick (0ms) removal was too tight once a table's resize
-        // interaction added its own teardown work ahead of this — the
-        // EmptyError rejection can land on a later tick than that. 300ms
-        // comfortably covers it without leaving the guard live long enough
-        // to risk swallowing an unrelated later EmptyError.
+        // Covers the anchorRect/"Table is not found." races only now (see
+        // this listener's own doc comment) — EmptyError no longer relies
+        // on this window at all. 300ms comfortably outlasts any teardown
+        // work still in flight (tableResize.dispose(), etc.) without
+        // leaving the guard live long enough to risk swallowing an
+        // unrelated later error.
         setTimeout(() => {
-          window.removeEventListener("unhandledrejection", swallowEmptyError);
           window.removeEventListener("error", suppressKnownBenignUniverErrors);
         }, 300);
       }
@@ -1442,6 +1463,7 @@ export default function DocsEditor({
           pendingPlainRef={pendingPlainRef}
           pendingTableAlignRef={pendingTableAlignRef}
           googleDocsPayload={pasteDialog.googleDocsPayload}
+          onRichPasteDetected={onRichPasteDetected}
           onClose={() => setPasteDialog(null)}
         />
       )}
