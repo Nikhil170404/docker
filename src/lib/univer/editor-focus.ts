@@ -1,6 +1,11 @@
 import { ICommandService, toDisposable } from "@univerjs/core";
 import type { IDisposable, Injector } from "@univerjs/core";
-import { CreateDocTableCommand, DocSelectionRenderService } from "@univerjs/docs-ui";
+import {
+  CreateDocTableCommand,
+  DocSelectionRenderService,
+  SetInlineFormatFontFamilyCommand,
+  SetInlineFormatFontSizeCommand,
+} from "@univerjs/docs-ui";
 import { IRenderManagerService } from "@univerjs/engine-render";
 
 // Commands that are reached through one of Univer's modal dialogs. The
@@ -18,6 +23,8 @@ const AFTER_DIALOG_COMMANDS: readonly string[] = [
   // Univer's own paragraph and page dialogs, same shape.
   "doc-paragraph-setting.command",
   "docs.command.page-setup",
+  SetInlineFormatFontFamilyCommand.id,
+  SetInlineFormatFontSizeCommand.id,
 ];
 
 /**
