@@ -403,6 +403,30 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       });
     });
 
+    // Rich clipboard HTML commonly represents an aligned image as a block
+    // with auto margins, or wraps it in a div/span with text-align. Univer
+    // lays inline images out from the paragraph style, not those wrapper
+    // styles, so promote the alignment to the containing paragraph before
+    // import. This preserves centred logos and right-aligned images.
+    tmpDoc.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      const wrapper = img.closest<HTMLElement>("[style*='text-align']");
+      const wrapperAlign = wrapper?.style.textAlign;
+      const leftAuto = img.style.marginLeft === "auto";
+      const rightAuto = img.style.marginRight === "auto";
+      const alignment = wrapperAlign === "center" || (leftAuto && rightAuto)
+        ? "center"
+        : wrapperAlign === "right" || leftAuto
+          ? "right"
+          : wrapperAlign === "left" || rightAuto
+            ? "left"
+            : null;
+      if (!alignment) return;
+      const paragraph = img.closest<HTMLElement>("p, h1, h2, h3, h4, h5, h6");
+      if (paragraph) paragraph.style.textAlign = alignment;
+      img.style.removeProperty("margin-left");
+      img.style.removeProperty("margin-right");
+    });
+
     // Headings: preserve heading semantics via data-heading attribute so
     // Univer's getHeadingNamedStyleType fires, while also adding UniverNormal
     // for paragraph style resolution (text-align, line-height, spacing).
