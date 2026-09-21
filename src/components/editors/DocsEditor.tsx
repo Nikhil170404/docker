@@ -415,6 +415,18 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
   try {
     const tmpDoc = new DOMParser().parseFromString(clean, "text/html");
 
+    // Google Docs frequently uses the legacy HTML align attribute for
+    // paragraphs and image wrappers. Univer imports paragraph alignment from
+    // CSS, not that attribute, so preserve the source intent as text-align.
+    // Keep the attribute itself because table handling below also uses
+    // align="center" to apply Univer's table-model alignment after paste.
+    tmpDoc.querySelectorAll<HTMLElement>("[align]").forEach((el) => {
+      const align = (el.getAttribute("align") ?? "").toLowerCase();
+      if (align === "left" || align === "center" || align === "right" || align === "justify") {
+        if (!el.style.textAlign) el.style.textAlign = align;
+      }
+    });
+
     // Bake class-based styles into inline styles
     if (classStyles.size > 0) {
       tmpDoc.querySelectorAll("[class]").forEach((el) => {
