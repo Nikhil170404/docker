@@ -164,7 +164,11 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
           parentSpan.insertAdjacentElement("afterend", spanClone);
           // Now move the span clone and everything after it into newP
           let after: ChildNode | null = spanClone;
-          while (after) { const tmp = after.nextSibling; newP.appendChild(after); after = tmp; }
+          while (after) {
+            const nextSibling: ChildNode | null = after.nextSibling;
+            newP.appendChild(after);
+            after = nextSibling;
+          }
         } else {
           let next = br.nextSibling;
           while (next) { const tmp = next.nextSibling; newP.appendChild(next); next = tmp; }
