@@ -83,10 +83,10 @@ function extractGoogleDocsBookmarkAnchors(payload: string | null | undefined): s
     const anchors = new Set<string>();
     positions.forEach((entry, offset) => {
       if (!Array.isArray(entry) || !entry.some((id) => typeof id === "string" && bookmarkIds.has(id))) return;
-      const start = spacers.lastIndexOf("\\n", offset) + 1;
-      const end = spacers.indexOf("\\n", offset);
+      const start = spacers.lastIndexOf("\n", offset) + 1;
+      const end = spacers.indexOf("\n", offset);
       const label = spacers.slice(start, end === -1 ? undefined : end)
-        .replace(/[\\x00-\\x1f]/g, "").replace(/\\s+/g, " ").trim();
+        .replace(/[\x00-\x1f]/g, "").replace(/\\s+/g, " ").trim();
       if (label) anchors.add(label);
     });
     return [...anchors];
