@@ -20,6 +20,7 @@ import {
   ALL_TABLE_STYLE_COMMANDS,
   clearRememberedTableRange,
   resolveLiveTableRange,
+  SetTableAlignmentCommandId,
 } from "@/lib/univer/table-style-commands";
 import { SetBorderPenCommand } from "@/lib/univer/border-pen";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "@/lib/univer/persistence";
@@ -48,24 +49,52 @@ const STORAGE_KEY = "docs-default";
 
 // ─── Word paste utilities (module-level so PasteDialog can call them) ─────────
 
-const WORD_HTML_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=/i;
-// Google Docs puts this marker around its generated clipboard fragment. Its
-// HTML uses many of the same CSS constructs as Word (fixed table columns,
-// point-based spacing, and inline image alignment), so it needs the same
-// import path instead of Univer's lossy generic paste path.
-const GOOGLE_DOCS_HTML_RE = /docs-internal-guid-|google-docs|docs\.google\.com/i;
-const RICH_DOCUMENT_HTML_RE = new RegExp(`${WORD_HTML_RE.source}|${GOOGLE_DOCS_HTML_RE.source}`, "i");
+// Matches Word's clipboard markup (mso-*, xmlns:w=, ProgId=Word, ...) AND
+// Google Docs' (every Google Docs copy wraps its whole payload in
+// `<b id="docs-internal-guid-...">`, regardless of doc content). Both need
+// the same pt-unit and heading-semantics cleanup below before Univer's
+// paste handler can lay them out correctly — renamed from the Word-only
+// name this started as, since neither the detection nor most of the clean-
+// up in cleanWordHtml is actually Word-specific.
+const RICH_PASTE_SOURCE_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=|id="docs-internal-guid-/i;
 
 function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   // Phase 1: Extract class-based styles from <style> block
   const classStyles = new Map<string, string>();
+  // A heading (or any element) can also be styled by a bare TAG selector
+  // in the <style> block (`h1 { font-size: 16pt; font-weight: bold; ...
+  // }`, no class involved) — a legitimate, if less common, way real
+  // documents define "Heading 1" alongside the more usual class-based
+  // one. Only the class form was ever extracted here, so a tag-selector-
+  // styled heading carried no style information into the DOM at all: it
+  // rendered completely plain (no bold, no color, no size), not even
+  // falling into the "no explicit size, demote to a plain paragraph"
+  // path deliberately, since that path still preserves whatever the
+  // element itself specifies — there was simply nothing to preserve.
+  // Confirmed by pasting a real-shaped `h1 { ... }` rule with no class.
+  const tagStyles = new Map<string, string>();
   const styleBlockMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
   if (styleBlockMatch) {
-    const ruleRx = /\.(\w+)[^{]*\{([^}]+)\}/g;
+    const ruleRx = /([^{}]+)\{([^}]+)\}/g;
     let m: RegExpExecArray | null;
     while ((m = ruleRx.exec(styleBlockMatch[1])) !== null) {
       const props = m[2].split(";").map((p) => p.trim()).filter((p) => p && !/^mso-/i.test(p)).join("; ");
-      if (props) classStyles.set(m[1], props);
+      if (!props) continue;
+      for (const selector of m[1].split(",")) {
+        const trimmed = selector.trim();
+        if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(trimmed)) {
+          // A bare tag selector (`h1`), nothing else in the token at all.
+          tagStyles.set(trimmed.toLowerCase(), props);
+          continue;
+        }
+        // A class reference anywhere in the token — bare (`.MsoNormal`) or
+        // compound (`p.MsoNormal`, tag+class together, the far more common
+        // real-document form: `p.MsoNormal, li.MsoNormal, div.MsoNormal`).
+        // Not anchored to the token's start on purpose, matching this
+        // extraction's original (looser, but correct for that form) intent.
+        const classMatch = /\.(\w+)/.exec(trimmed);
+        if (classMatch) classStyles.set(classMatch[1], props);
+      }
     }
   }
 
@@ -73,6 +102,23 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   let working = html;
   try {
     const p0 = new DOMParser().parseFromString(html, "text/html");
+
+    // ⓪ Google Docs wraps its ENTIRE clipboard payload in
+    // `<b style="font-weight:normal;" id="docs-internal-guid-...">` — a
+    // pure internal marker, not real formatting intent (every Google Docs
+    // copy has one, regardless of content). Confirmed by pasting a real
+    // Google Doc: every single span underneath — including ones with their
+    // own explicit `font-weight:400` — rendered bold, because Univer's
+    // paste handler reads the ancestor <b> TAG semantically and never
+    // finds a later signal that clears it (each span's own font-weight
+    // does correctly control ITS OWN bold state once this wrapper is
+    // gone). Unwrapping this one marker element fixes the whole
+    // document's bold state at once instead of touching every span.
+    p0.querySelectorAll('b[id^="docs-internal-guid-"]').forEach((b) => {
+      const frag = p0.createDocumentFragment();
+      while (b.firstChild) frag.appendChild(b.firstChild);
+      b.replaceWith(frag);
+    });
 
     // ① MsoHeading → <h1>–<h5>
     p0.querySelectorAll("p").forEach((p) => {
@@ -150,10 +196,29 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
     // ③ <br> inside paragraphs → paragraph splits
     // When a <br> is inside a <span>, siblings after it must be re-wrapped in
     // a clone of that span so formatting (font, bold, color) is preserved.
+    // A <br> with nothing but more <br>s/whitespace after it inside the
+    // paragraph is a pure TRAILING break, not a real line to split off —
+    // Google Docs appends `<br><br>` to the last item of a list to
+    // represent blank space after it (confirmed in a real Google Doc's
+    // clipboard HTML). Splitting on those created a new EMPTY paragraph
+    // per trailing <br>, which — since this all happens inside a <li> —
+    // Univer's list layout rendered as its own spurious empty bullet, one
+    // per list in the whole document; across a long document with many
+    // lists, that pollution alone was enough to multiply the page count
+    // several times over. Dropping trailing <br>s instead of splitting on
+    // them avoids creating that empty content at all.
     p0.querySelectorAll("p").forEach((p) => {
       const brs = [...p.querySelectorAll("br")];
       if (brs.length === 0) return;
       brs.forEach((br) => {
+        const tailRange = p0.createRange();
+        tailRange.setStartAfter(br);
+        if (p.lastChild) tailRange.setEndAfter(p.lastChild);
+        const hasRealContentAfter = (tailRange.cloneContents().textContent ?? "").trim() !== "";
+        if (!hasRealContentAfter) {
+          br.remove();
+          return;
+        }
         const newP = p0.createElement("p");
         const cls = p.getAttribute("class"); const sty = p.getAttribute("style");
         if (cls) newP.setAttribute("class", cls);
@@ -164,17 +229,13 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         if (parentSpan) {
           // Move nodes after the br that are inside the span into a new span clone
           const spanClone = parentSpan.cloneNode(false) as HTMLElement;
-          let next = br.nextSibling;
+          let next: ChildNode | null = br.nextSibling;
           while (next) { const tmp = next.nextSibling; spanClone.appendChild(next); next = tmp; }
           br.remove();
           parentSpan.insertAdjacentElement("afterend", spanClone);
           // Now move the span clone and everything after it into newP
           let after: ChildNode | null = spanClone;
-          while (after) {
-            const nextSibling: ChildNode | null = after.nextSibling;
-            newP.appendChild(after);
-            after = nextSibling;
-          }
+          while (after) { const tmp: ChildNode | null = after.nextSibling; newP.appendChild(after); after = tmp; }
         } else {
           let next = br.nextSibling;
           while (next) { const tmp = next.nextSibling; newP.appendChild(next); next = tmp; }
@@ -182,6 +243,19 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         }
         p.insertAdjacentElement("afterend", newP);
       });
+    });
+
+    // ③.5 <hr> → a bordered empty paragraph. Univer's document model has
+    // no native horizontal-rule block, so a bare <hr> (Google Docs emits
+    // one for a manually-inserted divider line) is silently dropped by its
+    // paste converter — confirmed missing from a real paste despite being
+    // present in the source clipboard HTML.
+    p0.querySelectorAll("hr").forEach((hr) => {
+      const p = p0.createElement("p");
+      p.className = "UniverNormal";
+      p.style.cssText = "border-bottom: 1px solid #c0c0c0; margin: 6pt 0; height: 0;";
+      p.innerHTML = "&nbsp;";
+      hr.replaceWith(p);
     });
 
     // ④ CSS vertical-align super/sub → <sup>/<sub>
@@ -298,6 +372,17 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       });
     }
 
+    // Bake bare-tag-selector styles into inline styles too (h1 { ... },
+    // with no class involved — see the extraction comment above).
+    if (tagStyles.size > 0) {
+      tagStyles.forEach((props, tag) => {
+        tmpDoc.querySelectorAll(tag).forEach((el) => {
+          const existing = (el as HTMLElement).style.cssText;
+          (el as HTMLElement).style.cssText = props + (existing ? "; " + existing : "");
+        });
+      });
+    }
+
     // Strip remaining mso-* from all inline styles
     tmpDoc.querySelectorAll("*").forEach((el) => {
       const s = (el as HTMLElement).style;
@@ -353,35 +438,110 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       }
     });
 
-    // Table width normalisation: retain the source table's relative width
-    // and proportional columns. Forcing every pasted table to 100% was
-    // visually destructive: narrow, centred tables became full-width and
-    // their text was squeezed into a different geometry than the source.
+    // Table width normalisation: 100% table, proportional px cells
+    // Width values here can be plain numbers (px/pt-ish, historically
+    // treated as px), or a CSS percentage — `width: 100%` is the single
+    // most common table width Google Docs emits. parseFloat("100%") is
+    // 100, so treating that as a raw pixel count (rather than 100% of the
+    // page) rendered a full-width table barely 100px wide — every column
+    // just a few characters across, text wrapping one letter per line.
+    // Confirmed by pasting a 3-column table with no per-cell widths, only
+    // `width: 100%` on the <table>: every cell collapsed to ~40px.
+    const PAGE_CONTENT_WIDTH = 660;
+    const parseWidthPx = (value: string, referencePx: number): number => {
+      const trimmed = value.trim();
+      if (!trimmed) return 0;
+      if (trimmed.endsWith("%")) {
+        const pct = parseFloat(trimmed);
+        return Number.isFinite(pct) ? (pct / 100) * referencePx : 0;
+      }
+      const px = parseFloat(trimmed);
+      return Number.isFinite(px) ? px : 0;
+    };
     tmpDoc.querySelectorAll("table").forEach((table) => {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
       // override our scaled cell widths computed below.
       table.querySelectorAll("colgroup, col").forEach((el) => el.remove());
-      const totalW = parseFloat((table as HTMLElement).style.width) || parseFloat(table.getAttribute("width") || "") || 0;
-      // 660px is the printable width of the default A4 document. Preserve a
-      // smaller source width, but cap oversized clipboard geometry to the
-      // printable area so it does not overflow a page.
-      const targetTableWidth = totalW > 0 ? Math.min(660, Math.round(totalW)) : 660;
+      // A table's own declared width and the sum of its cells' own declared
+      // widths can disagree — plausible in any document old/edited enough
+      // to have had columns and the table itself resized independently at
+      // different times (confirmed: a table whose cells summed to 820px
+      // while the table itself said 630px rendered the cells at their full
+      // undiminished size regardless, since scaling by a totalW smaller
+      // than what the cells actually sum to is a no-op — table overflowed
+      // the page). The cells' own sum is what actually determines each
+      // column's proportion, so it's the one used as the scaling
+      // reference whenever it's available, falling back to the table's
+      // own width only when no cell declares one at all.
+      const rowCellSums = [...table.querySelectorAll("tr")].map((row) =>
+        [...row.querySelectorAll("td, th")].reduce(
+          (sum, cell) =>
+            sum +
+            (parseWidthPx((cell as HTMLElement).style.width, PAGE_CONTENT_WIDTH) ||
+              parseWidthPx(cell.getAttribute("width") || "", PAGE_CONTENT_WIDTH)),
+          0,
+        ),
+      );
+      const bestRowCellSum = Math.max(0, ...rowCellSums);
+      const totalW =
+        bestRowCellSum ||
+        parseWidthPx((table as HTMLElement).style.width, PAGE_CONTENT_WIDTH) ||
+        parseWidthPx(table.getAttribute("width") || "", PAGE_CONTENT_WIDTH);
       table.removeAttribute("width");
       (table as HTMLElement).style.removeProperty("width");
-      (table as HTMLElement).style.setProperty("width", `${targetTableWidth}px`);
-      table.setAttribute("width", String(targetTableWidth));
+      // A table's own declared width was being discarded outright in favor
+      // of always stretching to the full page (100%) — correct for a table
+      // that spans the page, wrong for one deliberately narrower (a
+      // callout/box built from a single shaded cell, say): it pasted at
+      // full page width when the source had it noticeably narrower.
+      // PAGE_CONTENT_WIDTH is the same 660px reference the cell-width
+      // scaling below already assumes a full-width table occupies — a
+      // narrower source table now targets a proportionally narrower width
+      // instead, and cells scale against that same target so the two never
+      // disagree with each other the way they would if only one honored
+      // the source width.
+      const tableTargetWidth = totalW > 0 ? Math.min(totalW, PAGE_CONTENT_WIDTH) : PAGE_CONTENT_WIDTH;
+      (table as HTMLElement).style.setProperty("width", `${tableTargetWidth}px`);
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
-      const isBorderless = table.getAttribute("border") === "0";
+      // A table centered via CSS margin:auto (or the legacy align="center"
+      // attribute) — common for a narrower callout box — has no CSS-level
+      // effect once Univer parses it into its own document model, since
+      // table alignment there is a model property (ITable.align), not
+      // something a stray margin on the pasted element could ever satisfy.
+      // Tag it with a data attribute the paste-completion step below can
+      // find, in source order, to apply the real alignment command after
+      // the table actually exists in the document.
+      const marginLeft = (table as HTMLElement).style.marginLeft;
+      const marginRight = (table as HTMLElement).style.marginRight;
+      const isCentered =
+        table.getAttribute("align") === "center" ||
+        (marginLeft === "auto" && marginRight === "auto");
+      if (isCentered) (table as HTMLElement).setAttribute("data-align", "center");
+      // Word marks a borderless table with the legacy border="0" attribute;
+      // Google Docs (used for layout — a letterhead's logo/title/logo row,
+      // for instance) instead sets CSS `border: none` on the table and/or
+      // each cell. Only checking the old attribute left every Google-Docs
+      // layout table showing full black gridlines it never had (confirmed:
+      // a 3-column logo/title/logo header pasted with visible borders
+      // around each cell despite explicit `border: none` in the source).
+      const hasNoBorder = (el: HTMLElement) => /\bnone\b/i.test(el.style.border || el.style.borderStyle || "");
       // Word marks merged-cell "phantom" placeholders with display:none — remove them
-      // so Univer doesn't render empty phantom cells as visible blank columns.
+      // first, so a phantom cell never counts toward the "every cell says
+      // border:none" check below, nor gets processed by the loop after it.
       table.querySelectorAll<HTMLElement>("td[style*='display:none'], td[style*='display: none']").forEach((td) => td.remove());
       const cells = [...table.querySelectorAll("td, th")] as HTMLElement[];
+      const isBorderless =
+        table.getAttribute("border") === "0" ||
+        hasNoBorder(table) ||
+        (cells.length > 0 && cells.every(hasNoBorder));
       cells.forEach((cell) => {
-        const cellW = parseFloat(cell.style.width) || parseFloat(cell.getAttribute("width") || "") || 0;
+        const cellW =
+          parseWidthPx(cell.style.width, tableTargetWidth) ||
+          parseWidthPx(cell.getAttribute("width") || "", tableTargetWidth);
         cell.removeAttribute("width");
         cell.style.removeProperty("width");
         if (totalW > 0 && cellW > 0) {
-          const scaledPx = Math.round((cellW / totalW) * targetTableWidth);
+          const scaledPx = Math.round((cellW / totalW) * tableTargetWidth);
           cell.style.setProperty("width", `${scaledPx}px`);
           cell.setAttribute("width", String(scaledPx));
         }
@@ -403,34 +563,36 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       });
     });
 
-    // Rich clipboard HTML commonly represents an aligned image as a block
-    // with auto margins, or wraps it in a div/span with text-align. Univer
-    // lays inline images out from the paragraph style, not those wrapper
-    // styles, so promote the alignment to the containing paragraph before
-    // import. This preserves centred logos and right-aligned images.
-    tmpDoc.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
-      const wrapper = img.closest<HTMLElement>("[style*='text-align']");
-      const wrapperAlign = wrapper?.style.textAlign;
-      const leftAuto = img.style.marginLeft === "auto";
-      const rightAuto = img.style.marginRight === "auto";
-      const alignment = wrapperAlign === "center" || (leftAuto && rightAuto)
-        ? "center"
-        : wrapperAlign === "right" || leftAuto
-          ? "right"
-          : wrapperAlign === "left" || rightAuto
-            ? "left"
-            : null;
-      if (!alignment) return;
-      const paragraph = img.closest<HTMLElement>("p, h1, h2, h3, h4, h5, h6");
-      if (paragraph) paragraph.style.textAlign = alignment;
-      img.style.removeProperty("margin-left");
-      img.style.removeProperty("margin-right");
-    });
-
     // Headings: preserve heading semantics via data-heading attribute so
     // Univer's getHeadingNamedStyleType fires, while also adding UniverNormal
     // for paragraph style resolution (text-align, line-height, spacing).
+    //
+    // Univer's own paste parser recognizes a literal <h1>-<h5> TAG on its
+    // own (getHeadingNamedStyleType switches on node.tagName directly) and
+    // applies its own much larger default size for that heading level
+    // whenever the heading's own content doesn't specify a font-size —
+    // confirmed by pasting a real-shaped <h1> with no inline font-size on
+    // its span: it rendered noticeably larger than a real document's
+    // actual (often comparatively modest, e.g. a legal document's section
+    // heading) intended size, wrapping and even hyphenating where the
+    // source fit on one line. A heading WITH its own explicit font-size
+    // keeps that size regardless of tag, so only the sizeless case is a
+    // problem. Since there's no way to know what size was actually
+    // intended here, the safe choice is not to guess a number of our own
+    // either — demoting the tag to a plain paragraph (keeping whatever
+    // inline styling, typically just bold, the source did specify) means
+    // it inherits the document's normal text size instead of either
+    // Univer's oversized default or an invented one.
     tmpDoc.querySelectorAll("h1, h2, h3, h4, h5").forEach((h) => {
+      const hasExplicitSize = !!h.querySelector<HTMLElement>('[style*="font-size"]') || /font-size/.test((h as HTMLElement).style.cssText);
+      if (!hasExplicitSize) {
+        const p = tmpDoc.createElement("p");
+        [...h.attributes].forEach((a) => p.setAttribute(a.name, a.value));
+        p.innerHTML = h.innerHTML;
+        h.replaceWith(p);
+        p.className = (p.className + " UniverNormal").trim();
+        return;
+      }
       const level = h.tagName.toLowerCase();
       (h as HTMLElement).setAttribute("data-heading", level);
       (h as HTMLElement).className = ((h as HTMLElement).className + " UniverNormal").trim();
@@ -455,6 +617,21 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   return clean;
 }
 
+// Reads the data-align="center" markers cleanWordHtml leaves on tables, in
+// source document order — the same order the tables that land in the
+// document (newly-created table IDs, diffed before/after the paste) come
+// out in, letting the paste-completion step zip the two together.
+function extractTableAlignFlags(html: string): ("start" | "center")[] {
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return [...doc.querySelectorAll("table")].map((table) =>
+      table.getAttribute("data-align") === "center" ? "center" : "start",
+    );
+  } catch {
+    return [];
+  }
+}
+
 // ─── Paste-from-Word dialog ────────────────────────────────────────────────────
 
 function PasteDialog({
@@ -463,6 +640,7 @@ function PasteDialog({
   editorEl,
   pendingHtmlRef,
   pendingPlainRef,
+  pendingTableAlignRef,
   onClose,
 }: {
   rawHtml: string;
@@ -470,6 +648,7 @@ function PasteDialog({
   editorEl: Element | null;
   pendingHtmlRef: React.RefObject<string | null>;
   pendingPlainRef: React.RefObject<string | null>;
+  pendingTableAlignRef: React.RefObject<("start" | "center")[] | null>;
   onClose: () => void;
 }) {
   const insert = (mode: "keep" | "clean" | "text") => {
@@ -481,8 +660,10 @@ function PasteDialog({
           .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
           .split("\n").filter(Boolean).join("</p><p class=\"UniverNormal\">") +
         "</p>";
+      pendingTableAlignRef.current = null;
     } else {
       html = cleanWordHtml(rawHtml, mode);
+      pendingTableAlignRef.current = extractTableAlignFlags(html);
     }
     pendingHtmlRef.current = html;
     pendingPlainRef.current = plainText;
@@ -613,6 +794,7 @@ export default function DocsEditor({
   const [ready, setReady] = useState(false);
   const pendingHtmlRef = useRef<string | null>(null);
   const pendingPlainRef = useRef<string | null>(null);
+  const pendingTableAlignRef = useRef<("start" | "center")[] | null>(null);
   const [pasteDialog, setPasteDialog] = useState<{
     rawHtml: string;
     plainText: string;
@@ -631,6 +813,53 @@ export default function DocsEditor({
 
     // Word types "/" as a character; Univer's block menu steals the key.
     disableSlashMenu();
+
+    // Univer's own popup-positioning pipeline (@univerjs/ui, shared by
+    // every dropdown/context-menu/floating-toolbar it renders — the ribbon
+    // dropdowns, the paragraph "quick action" popup, table context menus,
+    // all of it) destructures `{ bottom, left, right, top }` from an
+    // `anchorRect` it expects its anchor observable to always emit. Hit
+    // once in real use ("Cannot destructure property 'bottom' of
+    // 'anchorRect' as it is undefined") but never reproduced despite
+    // extensive attempts — synthetic paste, real Cmd+V paste, ribbon
+    // dropdowns, scrolling, clicking through pasted content — so the exact
+    // anchor-element-disappears-mid-positioning race is still unknown, and
+    // it's deep inside vendored Univer code we don't control or want to
+    // patch directly. Since this is a popup failing to position (not a
+    // document-data error), losing that one popup and continuing is far
+    // better than Next's dev overlay taking over the whole page; anything
+    // else still surfaces normally.
+    //
+    // Also covers the "EmptyError" dispose race documented at this
+    // component's cleanup below (univer.dispose() completing an RxJS
+    // Subject with no elements left in its sequence). That race is real
+    // and was already guarded there, but with the wrong tool: a real
+    // unmount-with-a-table-present test showed it landing as an uncaught
+    // *window `error` event*, not the `unhandledrejection` the cleanup's
+    // own guard listens for. RxJS's internal errorContext() wrapper
+    // deliberately defers a Subject subscriber's synchronous error to a
+    // fresh task specifically so ordinary try/catch around .complete()
+    // can't see it, then dispatches it as a raw global error — which is
+    // exactly what this listener, unlike that one, actually catches.
+    // "Table is not found." — thrown by Univer's own spanEntireRow/
+    // spanEntireColumn getters (docs-ui) when a selection's own tableId no
+    // longer resolves in tableSource, e.g. a rectRange left over from a
+    // prior selection state after the table it pointed at was replaced or
+    // removed. Reported crashing Select All / Backspace in real use; not
+    // reproduced despite many attempts (typing then Cmd+A inside a cell,
+    // Cmd+A immediately after table creation, pasting multiple tables then
+    // Cmd+A+Backspace) with or without a deep window-level listener to
+    // catch a deferred throw. Same class as the two errors above — a
+    // stale-selection read, not a document-data corruption — so the same
+    // mitigation applies: suppress the crash so the editor keeps working
+    // instead of Next's overlay taking over, even without the exact
+    // trigger pinned down.
+    const suppressKnownBenignUniverErrors = (event: ErrorEvent) => {
+      if (event.error instanceof TypeError && /anchorRect/.test(event.message)) event.preventDefault();
+      if (event.error?.name === "EmptyError") event.preventDefault();
+      if (event.error instanceof Error && event.error.message === "Table is not found.") event.preventDefault();
+    };
+    window.addEventListener("error", suppressKnownBenignUniverErrors);
 
     const { univer, univerAPI } = createUniver({
       theme: WORD_THEME,
@@ -738,6 +967,21 @@ export default function DocsEditor({
     // The ruler needs the page's on-screen position, which is the document
     // component's own offset inside the scene, shifted by the horizontal
     // scroll and multiplied by the zoom.
+    //
+    // This originally always used `documents.top` as-is (page 1's own
+    // origin), so both rulers only ever showed page 1's geometry — as
+    // soon as a real multi-page document was scrolled past roughly one
+    // page's height, `pageTop` (page 1's now-scrolled-off-screen position)
+    // put every tick off the top of the viewport, and the vertical ruler
+    // went blank instead of following the page actually in view.
+    // Univer stacks pages vertically at `pageIndex * (pageHeight +
+    // pageGap)` from that same origin (confirmed by reading
+    // DocumentSkeletonManagerService's own layout math and its
+    // `pageMarginTop` config, which defaults to 14 document px when
+    // unset, as it is here) — recomputing pageTop for whichever page the
+    // current scroll position falls into keeps the ruler correct on every
+    // page, not just the first.
+    const PAGE_GAP = 14;
     rulerGeometryRef.current = () => {
       const container = containerRef.current;
       const renderUnit = renderManagerService.getRenderUnitById(fDoc.getId());
@@ -758,11 +1002,15 @@ export default function DocsEditor({
       const canvasRect = canvas.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
       const scrollY = scene.getViewport("viewMain")?.viewportScrollY ?? 0;
+      const pageHeightDoc = style.pageSize.height ?? 1123;
+      const pageStride = pageHeightDoc + PAGE_GAP;
+      const pageIndex = Math.max(0, Math.floor((scrollY - documents.top) / pageStride));
+      const currentPageTop = documents.top + pageIndex * pageStride;
       return {
         pageLeft: canvasOffset + (documents.left - scrollX) * scale,
-        pageTop: canvasRect.top - containerRect.top + (documents.top - scrollY) * scale,
+        pageTop: canvasRect.top - containerRect.top + (currentPageTop - scrollY) * scale,
         pageWidth: style.pageSize.width * scale,
-        pageHeight: (style.pageSize.height ?? 1123) * scale,
+        pageHeight: pageHeightDoc * scale,
         marginLeft: style.marginLeft ?? 72,
         marginRight: style.marginRight ?? 72,
         marginTop: style.marginTop ?? 72,
@@ -791,20 +1039,49 @@ export default function DocsEditor({
         const t = pendingPlainRef.current; pendingPlainRef.current = null; return t;
       }
       const data = originalGetData.call(this, type) as string;
-      // Fallback: clean rich document HTML silently if it bypasses capture.
-      if (type === "text/html" && RICH_DOCUMENT_HTML_RE.test(data)) return cleanWordHtml(data);
+      // Fallback: clean silently if Word HTML bypasses the capture listener
+      if (type === "text/html" && RICH_PASTE_SOURCE_RE.test(data)) return cleanWordHtml(data);
       return data;
     };
 
     const handleWordPasteCapture = (e: ClipboardEvent) => {
       const html = originalGetData.call(e.clipboardData, "text/html") as string;
-      if (!html || !RICH_DOCUMENT_HTML_RE.test(html)) return;
+      if (!html || !RICH_PASTE_SOURCE_RE.test(html)) return;
       e.preventDefault();
       e.stopPropagation();
       const plain = originalGetData.call(e.clipboardData, "text/plain") as string;
       setPasteDialog({ rawHtml: html, plainText: plain, editorEl: document.activeElement });
     };
     document.addEventListener("paste", handleWordPasteCapture, true);
+
+    // Applies table centering after a paste actually lands, since Univer's
+    // paste-import has no HTML-CSS-to-document mapping for it at all
+    // (confirmed by reading every use of TableAlignmentType in docs-ui —
+    // the only one is Insert Table's own default) — a pasted centered
+    // table would otherwise sit flush against the left margin regardless.
+    // Registered as a capture-phase listener alongside handleWordPasteCapture
+    // above so it also sees PasteDialog's synthetic re-dispatch and can
+    // snapshot the table IDs already in the document BEFORE Univer's own
+    // (later-phase) paste handling inserts the new ones; diffing against
+    // that snapshot after a short delay identifies exactly which tables
+    // just arrived, in the same order cleanWordHtml recorded their
+    // centering in.
+    const handleTableAlignAfterPaste = () => {
+      const flags = pendingTableAlignRef.current;
+      if (!flags || flags.length === 0) return;
+      const beforeIds = new Set(fDoc.getDocumentDataModel()?.getBody()?.tables?.map((t) => t.tableId) ?? []);
+      setTimeout(() => {
+        const afterTables = fDoc.getDocumentDataModel()?.getBody()?.tables ?? [];
+        const newTables = afterTables.filter((t) => !beforeIds.has(t.tableId));
+        newTables.forEach((t, i) => {
+          if (flags[i] === "center") {
+            void commandService.executeCommand(SetTableAlignmentCommandId, { tableId: t.tableId, align: "center" });
+          }
+        });
+        pendingTableAlignRef.current = null;
+      }, 300);
+    };
+    document.addEventListener("paste", handleTableAlignAfterPaste, true);
 
     // Secondary interception: programmatic clipboard reads
     const originalClipboardRead = navigator.clipboard.read.bind(navigator.clipboard);
@@ -815,7 +1092,7 @@ export default function DocsEditor({
         if (item.types.includes("text/html")) {
           const blob = await item.getType("text/html");
           const html = await blob.text();
-          if (RICH_DOCUMENT_HTML_RE.test(html)) {
+          if (RICH_PASTE_SOURCE_RE.test(html)) {
             const parts: Record<string, Blob | Promise<Blob>> = {
               "text/html": new Blob([cleanWordHtml(html)], { type: "text/html" }),
             };
@@ -933,6 +1210,22 @@ export default function DocsEditor({
     void refreshStatus();
 
     return () => {
+      // Registered first and removed last (see below), covering every
+      // dispose() call in this cleanup, not just univer.dispose()'s own.
+      // Originally this was set up immediately around univer.dispose()
+      // only, on the assumption that was the sole source of the race —
+      // true until a table's resize interaction was also live: its own
+      // teardown (tableResize.dispose(), a few lines down) does enough
+      // additional async unsubscribing that the EmptyError rejection from
+      // univer.dispose() further below could still land after a same-tick
+      // removal window, confirmed by a real unmount-with-a-table-present
+      // test leaking it as an uncaught rejection despite the guard already
+      // being in place.
+      const swallowEmptyError = (event: PromiseRejectionEvent) => {
+        if (event.reason?.name === "EmptyError") event.preventDefault();
+      };
+      window.addEventListener("unhandledrejection", swallowEmptyError);
+
       subscription.unsubscribe();
       commandSubscription.dispose();
       registrations.forEach((registration) => registration.dispose());
@@ -943,6 +1236,7 @@ export default function DocsEditor({
       DataTransfer.prototype.getData = originalGetData;
       navigator.clipboard.read = originalClipboardRead;
       document.removeEventListener("paste", handleWordPasteCapture, true);
+      document.removeEventListener("paste", handleTableAlignAfterPaste, true);
       pageChrome.dispose();
       dialogFocus.dispose();
       spellChecker.dispose();
@@ -962,11 +1256,9 @@ export default function DocsEditor({
       // stack traces as if thrown right here. Harmless: the instance is
       // being torn down either way. Swallow only this specific error so a
       // fast unmount doesn't crash the dev overlay / bubble as an uncaught
-      // rejection, while any other dispose failure still surfaces.
-      const swallowEmptyError = (event: PromiseRejectionEvent) => {
-        if (event.reason?.name === "EmptyError") event.preventDefault();
-      };
-      window.addEventListener("unhandledrejection", swallowEmptyError);
+      // rejection, while any other dispose failure still surfaces. (Guard
+      // itself is registered at the top of this cleanup function now — see
+      // there for why.)
 
       // Same race, different symptom: dispose() can synchronously unmount
       // an internal React root Univer owns (its own toolbar/canvas overlay)
@@ -986,7 +1278,15 @@ export default function DocsEditor({
         if ((err as Error)?.name !== "EmptyError") throw err;
       } finally {
         console.error = originalConsoleError;
-        setTimeout(() => window.removeEventListener("unhandledrejection", swallowEmptyError), 0);
+        // A same-tick (0ms) removal was too tight once a table's resize
+        // interaction added its own teardown work ahead of this — the
+        // EmptyError rejection can land on a later tick than that. 300ms
+        // comfortably covers it without leaving the guard live long enough
+        // to risk swallowing an unrelated later EmptyError.
+        setTimeout(() => {
+          window.removeEventListener("unhandledrejection", swallowEmptyError);
+          window.removeEventListener("error", suppressKnownBenignUniverErrors);
+        }, 300);
       }
 
       disposedRef.current = false;
@@ -1028,6 +1328,7 @@ export default function DocsEditor({
           editorEl={pasteDialog.editorEl}
           pendingHtmlRef={pendingHtmlRef}
           pendingPlainRef={pendingPlainRef}
+          pendingTableAlignRef={pendingTableAlignRef}
           onClose={() => setPasteDialog(null)}
         />
       )}
