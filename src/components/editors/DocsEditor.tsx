@@ -58,7 +58,62 @@ const STORAGE_KEY = "docs-default";
 // up in cleanWordHtml is actually Word-specific.
 const RICH_PASTE_SOURCE_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=|id="docs-internal-guid-/i;
 
-function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
+const GOOGLE_DOCS_SLICE_MIME = "application/x-vnd.google-docs-document-slice-clip+wrapped";
+
+function extractGoogleDocsBookmarkAnchors(payload: string | null | undefined): string[] {
+  if (!payload) return [];
+  try {
+    const outer = JSON.parse(payload) as { data?: string };
+    if (typeof outer.data !== "string") return [];
+    const resolved = (JSON.parse(outer.data) as {
+      resolved?: {
+        dsl_spacers?: string;
+        dsl_entitypositionmap?: { bookmark?: unknown[] };
+        dsl_entitytypemap?: Record<string, string>;
+      };
+    }).resolved;
+    const spacers = resolved?.dsl_spacers;
+    const positions = resolved?.dsl_entitypositionmap?.bookmark;
+    const types = resolved?.dsl_entitytypemap;
+    if (!spacers || !positions || !types) return [];
+
+    const bookmarkIds = new Set(
+      Object.entries(types).filter(([, type]) => type === "bookmark").map(([id]) => id)
+    );
+    const anchors = new Set<string>();
+    positions.forEach((entry, offset) => {
+      if (!Array.isArray(entry) || !entry.some((id) => typeof id === "string" && bookmarkIds.has(id))) return;
+      const start = spacers.lastIndexOf("\n", offset) + 1;
+      const end = spacers.indexOf("\n", offset);
+      const label = spacers.slice(start, end === -1 ? undefined : end)
+        .replace(/[\x00-\x1f]/g, "").replace(/\s+/g, " ").trim();
+      if (label) anchors.add(label);
+    });
+    return [...anchors];
+  } catch {
+    return [];
+  }
+}
+
+function addGoogleDocsBookmarkMarkers(doc: Document, anchors: readonly string[]) {
+  if (anchors.length === 0) return;
+  const remaining = new Set(anchors);
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("p, h1, h2, h3, h4, h5, h6, li"))) {
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!remaining.has(text)) continue;
+    const marker = doc.createElement("span");
+    marker.setAttribute("data-google-docs-bookmark", "true");
+    marker.setAttribute("aria-label", "Bookmark");
+    marker.textContent = "🔖 ";
+    marker.style.cssText = "font-size:10pt; line-height:1; vertical-align:baseline;";
+    element.insertBefore(marker, element.firstChild);
+    remaining.delete(text);
+    if (remaining.size === 0) break;
+  }
+}
+
+
+function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocsPayload?: string | null): string {
   // Phase 1: Extract class-based styles from <style> block
   const classStyles = new Map<string, string>();
   // A heading (or any element) can also be styled by a bare TAG selector
@@ -664,6 +719,7 @@ function PasteDialog({
   pendingHtmlRef,
   pendingPlainRef,
   pendingTableAlignRef,
+  googleDocsPayload,
   onClose,
 }: {
   rawHtml: string;
@@ -672,6 +728,7 @@ function PasteDialog({
   pendingHtmlRef: React.RefObject<string | null>;
   pendingPlainRef: React.RefObject<string | null>;
   pendingTableAlignRef: React.RefObject<("start" | "center")[] | null>;
+  googleDocsPayload?: string | null;
   onClose: () => void;
 }) {
   const insert = (mode: "keep" | "clean" | "text") => {
@@ -685,7 +742,7 @@ function PasteDialog({
         "</p>";
       pendingTableAlignRef.current = null;
     } else {
-      html = cleanWordHtml(rawHtml, mode);
+      html = cleanWordHtml(rawHtml, mode, googleDocsPayload);
       pendingTableAlignRef.current = extractTableAlignFlags(html);
     }
     pendingHtmlRef.current = html;
@@ -821,6 +878,7 @@ export default function DocsEditor({
   const [pasteDialog, setPasteDialog] = useState<{
     rawHtml: string;
     plainText: string;
+    googleDocsPayload?: string | null;
     editorEl: Element | null;
   } | null>(null);
 
@@ -1063,7 +1121,7 @@ export default function DocsEditor({
       }
       const data = originalGetData.call(this, type) as string;
       // Fallback: clean silently if Word HTML bypasses the capture listener
-      if (type === "text/html" && RICH_PASTE_SOURCE_RE.test(data)) return cleanWordHtml(data);
+      if (type === "text/html" && RICH_PASTE_SOURCE_RE.test(data)) return cleanWordHtml(data, "keep", originalGetData.call(this, GOOGLE_DOCS_SLICE_MIME));
       return data;
     };
 
@@ -1073,7 +1131,8 @@ export default function DocsEditor({
       e.preventDefault();
       e.stopPropagation();
       const plain = originalGetData.call(e.clipboardData, "text/plain") as string;
-      setPasteDialog({ rawHtml: html, plainText: plain, editorEl: document.activeElement });
+      const googleDocsPayload = originalGetData.call(e.clipboardData, GOOGLE_DOCS_SLICE_MIME) as string;
+      setPasteDialog({ rawHtml: html, plainText: plain, googleDocsPayload, editorEl: document.activeElement });
     };
     document.addEventListener("paste", handleWordPasteCapture, true);
 
@@ -1117,7 +1176,7 @@ export default function DocsEditor({
           const html = await blob.text();
           if (RICH_PASTE_SOURCE_RE.test(html)) {
             const parts: Record<string, Blob | Promise<Blob>> = {
-              "text/html": new Blob([cleanWordHtml(html)], { type: "text/html" }),
+              "text/html": new Blob([cleanWordHtml(html, "keep", item.types.includes(GOOGLE_DOCS_SLICE_MIME) ? await (await item.getType(GOOGLE_DOCS_SLICE_MIME)).text() : null)], { type: "text/html" }),
             };
             if (item.types.includes("text/plain")) parts["text/plain"] = item.getType("text/plain");
             cleaned.push(new ClipboardItem(parts));
@@ -1352,6 +1411,7 @@ export default function DocsEditor({
           pendingHtmlRef={pendingHtmlRef}
           pendingPlainRef={pendingPlainRef}
           pendingTableAlignRef={pendingTableAlignRef}
+          googleDocsPayload={pasteDialog.googleDocsPayload}
           onClose={() => setPasteDialog(null)}
         />
       )}
