@@ -175,6 +175,20 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
       b.replaceWith(frag);
     });
 
+    // Google Docs centres a row of inline images by inserting tab stops
+    // before the images instead of emitting text-align:center. Those tabs
+    // cannot be mapped to Univer's tab-stop model, so preserve their visual
+    // intent on image-only paragraphs and remove the positioning artifacts.
+    p0.querySelectorAll<HTMLElement>("p").forEach((p) => {
+      const images = p.querySelectorAll("img");
+      const tabs = p.querySelectorAll(".Apple-tab-span");
+      const text = (p.textContent ?? "").replace(/[\\s\\u00a0]/g, "");
+      if (images.length > 0 && tabs.length >= 2 && text.length === 0) {
+        p.style.textAlign = "center";
+        tabs.forEach((tab) => tab.remove());
+      }
+    });
+
     // ① MsoHeading → <h1>–<h5>
     p0.querySelectorAll("p").forEach((p) => {
       const m = (p as HTMLElement).className.match(/\bMsoHeading(\d)\b/i);
@@ -522,8 +536,12 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
         const pct = parseFloat(trimmed);
         return Number.isFinite(pct) ? (pct / 100) * referencePx : 0;
       }
-      const px = parseFloat(trimmed);
-      return Number.isFinite(px) ? px : 0;
+      const value = parseFloat(trimmed);
+      if (!Number.isFinite(value)) return 0;
+      // Google Docs serializes physical table widths in points. CSS pixels
+      // are 96dpi (1pt = 4/3px), so treating 451pt as 451px made the
+      // source's near-full-width callout noticeably too narrow.
+      return trimmed.endsWith("pt") ? value * (4 / 3) : value;
     };
     tmpDoc.querySelectorAll("table").forEach((table) => {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
@@ -675,7 +693,7 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep", googleDocs
     // Univer's oversized default or an invented one.
     tmpDoc.querySelectorAll("h1, h2, h3, h4, h5").forEach((h) => {
       const hasExplicitSize = !!h.querySelector<HTMLElement>('[style*="font-size"]') || /font-size/.test((h as HTMLElement).style.cssText);
-      if (!hasExplicitSize) {
+      // Univer ignores paragraph alignment on semantic heading tags. Google Docs\n      // may use a styled h1 merely for a subtitle, so preserve its visual\n      // alignment by importing it as a regular paragraph in that case.\n      if (!hasExplicitSize || !!(h as HTMLElement).style.textAlign) {
         const p = tmpDoc.createElement("p");
         [...h.attributes].forEach((a) => p.setAttribute(a.name, a.value));
         p.innerHTML = h.innerHTML;
