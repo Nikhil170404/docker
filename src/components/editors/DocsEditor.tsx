@@ -86,7 +86,7 @@ function extractGoogleDocsBookmarkAnchors(payload: string | null | undefined): s
       const start = spacers.lastIndexOf("\n", offset) + 1;
       const end = spacers.indexOf("\n", offset);
       const label = spacers.slice(start, end === -1 ? undefined : end)
-        .replace(/[\x00-\x1f]/g, "").replace(/\\s+/g, " ").trim();
+        .replace(/[\x00-\x1f]/g, "").replace(/\s+/g, " ").trim();
       if (label) anchors.add(label);
     });
     return [...anchors];
@@ -99,7 +99,7 @@ function addGoogleDocsBookmarkMarkers(doc: Document, anchors: readonly string[])
   if (anchors.length === 0) return;
   const remaining = new Set(anchors);
   for (const element of Array.from(doc.querySelectorAll<HTMLElement>("p, h1, h2, h3, h4, h5, h6, li"))) {
-    const text = (element.textContent ?? "").replace(/\\s+/g, " ").trim();
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
     if (!remaining.has(text)) continue;
     const marker = doc.createElement("span");
     marker.setAttribute("data-google-docs-bookmark", "true");
