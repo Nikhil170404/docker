@@ -49,6 +49,12 @@ const STORAGE_KEY = "docs-default";
 // ─── Word paste utilities (module-level so PasteDialog can call them) ─────────
 
 const WORD_HTML_RE = /mso-|xmlns:w=|class="?Mso|ProgId="?Word|Generator.*Microsoft Word|xmlns:o=/i;
+// Google Docs puts this marker around its generated clipboard fragment. Its
+// HTML uses many of the same CSS constructs as Word (fixed table columns,
+// point-based spacing, and inline image alignment), so it needs the same
+// import path instead of Univer's lossy generic paste path.
+const GOOGLE_DOCS_HTML_RE = /docs-internal-guid-|google-docs|docs\.google\.com/i;
+const RICH_DOCUMENT_HTML_RE = new RegExp(`${WORD_HTML_RE.source}|${GOOGLE_DOCS_HTML_RE.source}`, "i");
 
 function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
   // Phase 1: Extract class-based styles from <style> block
@@ -347,15 +353,23 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
       }
     });
 
-    // Table width normalisation: 100% table, proportional px cells
+    // Table width normalisation: retain the source table's relative width
+    // and proportional columns. Forcing every pasted table to 100% was
+    // visually destructive: narrow, centred tables became full-width and
+    // their text was squeezed into a different geometry than the source.
     tmpDoc.querySelectorAll("table").forEach((table) => {
       // Remove <colgroup>/<col> — Univer reads col widths first and would
       // override our scaled cell widths computed below.
       table.querySelectorAll("colgroup, col").forEach((el) => el.remove());
       const totalW = parseFloat((table as HTMLElement).style.width) || parseFloat(table.getAttribute("width") || "") || 0;
+      // 660px is the printable width of the default A4 document. Preserve a
+      // smaller source width, but cap oversized clipboard geometry to the
+      // printable area so it does not overflow a page.
+      const targetTableWidth = totalW > 0 ? Math.min(660, Math.round(totalW)) : 660;
       table.removeAttribute("width");
       (table as HTMLElement).style.removeProperty("width");
-      (table as HTMLElement).style.setProperty("width", "100%");
+      (table as HTMLElement).style.setProperty("width", `${targetTableWidth}px`);
+      table.setAttribute("width", String(targetTableWidth));
       (table as HTMLElement).style.setProperty("border-collapse", "collapse");
       const isBorderless = table.getAttribute("border") === "0";
       // Word marks merged-cell "phantom" placeholders with display:none — remove them
@@ -367,7 +381,7 @@ function cleanWordHtml(html: string, mode: "keep" | "clean" = "keep"): string {
         cell.removeAttribute("width");
         cell.style.removeProperty("width");
         if (totalW > 0 && cellW > 0) {
-          const scaledPx = Math.round((cellW / totalW) * 660);
+          const scaledPx = Math.round((cellW / totalW) * targetTableWidth);
           cell.style.setProperty("width", `${scaledPx}px`);
           cell.setAttribute("width", String(scaledPx));
         }
@@ -753,14 +767,14 @@ export default function DocsEditor({
         const t = pendingPlainRef.current; pendingPlainRef.current = null; return t;
       }
       const data = originalGetData.call(this, type) as string;
-      // Fallback: clean silently if Word HTML bypasses the capture listener
-      if (type === "text/html" && WORD_HTML_RE.test(data)) return cleanWordHtml(data);
+      // Fallback: clean rich document HTML silently if it bypasses capture.
+      if (type === "text/html" && RICH_DOCUMENT_HTML_RE.test(data)) return cleanWordHtml(data);
       return data;
     };
 
     const handleWordPasteCapture = (e: ClipboardEvent) => {
       const html = originalGetData.call(e.clipboardData, "text/html") as string;
-      if (!html || !WORD_HTML_RE.test(html)) return;
+      if (!html || !RICH_DOCUMENT_HTML_RE.test(html)) return;
       e.preventDefault();
       e.stopPropagation();
       const plain = originalGetData.call(e.clipboardData, "text/plain") as string;
@@ -777,7 +791,7 @@ export default function DocsEditor({
         if (item.types.includes("text/html")) {
           const blob = await item.getType("text/html");
           const html = await blob.text();
-          if (WORD_HTML_RE.test(html)) {
+          if (RICH_DOCUMENT_HTML_RE.test(html)) {
             const parts: Record<string, Blob | Promise<Blob>> = {
               "text/html": new Blob([cleanWordHtml(html)], { type: "text/html" }),
             };
